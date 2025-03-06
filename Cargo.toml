@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nalgebra = "0.33.2"
-raylib = { version = "5.0.2", features = ["nalgebra", "nalgebra_interop", "serde", "with_serde", "nightly"] }
+nalgebra = "*"
+parking_lot = { version = "*", features = ["nightly", "serde"] }
+raylib = { version = "*", features = ["nalgebra", "nalgebra_interop", "serde", "with_serde", "nightly"] }
