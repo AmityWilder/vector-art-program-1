@@ -1,6 +1,6 @@
 #![feature(let_chains, if_let_guard)]
 
-use std::{cell::RefCell, collections::VecDeque, ffi::CString, path::PathBuf, sync::{Arc, RwLock}};
+use std::{cell::RefCell, collections::VecDeque, path::PathBuf, sync::{Arc, RwLock}};
 use parking_lot::ReentrantMutex;
 use raylib::prelude::*;
 
@@ -274,11 +274,12 @@ impl Editor {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct EngineTheme {
     pub color_background: Color,
     pub color_foreground: Color,
     pub color_panel: Color,
+    pub color_panel_edge: Color,
     pub color_accent: Color,
     pub font_size: i32,
 }
@@ -289,6 +290,7 @@ impl EngineTheme {
             color_background: Color::new(24, 24, 24, 255),
             color_foreground: Color::new(200, 200, 200, 255),
             color_panel: Color::new(48, 48, 48, 255),
+            color_panel_edge: Color::new(32, 32, 32, 255),
             color_accent: Color::BLUEVIOLET,
             font_size: 10,
         }
@@ -401,7 +403,8 @@ fn main() {
         const TAB_PADDING_H: f32 = 5.0;
         const TAB_PADDING_V: f32 = 3.0;
         const TAB_MAX_WIDTH: f32 = 100.0;
-        let mut tab_rect = Rectangle::new(0.0, 0.0, 0.0, engine.theme.font_size as f32 + TAB_PADDING_V * 2.0);
+        let mut tab_rect = Rectangle::new(0.0, 0.0, d.get_render_width() as f32, engine.theme.font_size as f32 + TAB_PADDING_V * 2.0);
+        d.draw_rectangle_rec(tab_rect, engine.theme.color_panel_edge);
         for (i, editor) in engine.editors.iter().map(Box::as_ref).enumerate() {
             let tab_name = editor.document.title.as_str();
             let name_width = d.measure_text(tab_name, engine.theme.font_size) as f32 + TAB_PADDING_H * 2.0;
