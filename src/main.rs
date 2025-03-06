@@ -1,13 +1,16 @@
-#![feature(let_chains, if_let_guard)]
+#![feature(let_chains, if_let_guard, arbitrary_self_types)]
 
-use std::{cell::RefCell, collections::VecDeque, path::PathBuf, sync::{Arc, RwLock}};
+use std::{cell::RefCell, path::PathBuf, sync::{Arc, RwLock, Weak}};
 use parking_lot::ReentrantMutex;
-use raylib::prelude::*;
+use raylib::prelude::{*, KeyboardKey::*, MouseButton::*};
+
+pub type ArcRTex = Arc<ReentrantMutex<RefCell<RenderTexture2D>>>;
+pub type WeakRTex = Weak<ReentrantMutex<RefCell<RenderTexture2D>>>;
 
 #[derive(Debug, Clone)]
 pub enum Pattern {
     Solid(Color),
-    Texture(Arc<ReentrantMutex<RefCell<RenderTexture2D>>>),
+    Texture(WeakRTex),
 }
 
 impl Default for Pattern {
@@ -175,27 +178,67 @@ impl Style {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VectorPath {
-    pub points: VecDeque<Vector2>,
+pub type ArcStyle = Arc<ReentrantMutex<RefCell<Style>>>;
+pub type WeakStyle = Weak<ReentrantMutex<RefCell<Style>>>;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CurvePoint {
+    pub c_in: Option<Vector2>,
+    pub p: Vector2,
+    pub c_out: Option<Vector2>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Curve {
+    pub points: Vec<CurvePoint>,
     pub is_closed: bool,
 }
 
-#[derive(Debug)]
+pub type ArcCurve = Arc<ReentrantMutex<RefCell<Curve>>>;
+pub type WeakCurve = Weak<ReentrantMutex<RefCell<Curve>>>;
+
+impl From<Rectangle> for Curve {
+    fn from(Rectangle { x, y, width, height }: Rectangle) -> Self {
+        let left = x;
+        let top = y;
+        let right = x + width;
+        let bottom = y + height;
+        Self {
+            points: vec![
+                CurvePoint { c_in: None, p: Vector2::new(left, top), c_out: None },
+                CurvePoint { c_in: None, p: Vector2::new(right, top), c_out: None },
+                CurvePoint { c_in: None, p: Vector2::new(right, bottom), c_out: None },
+                CurvePoint { c_in: None, p: Vector2::new(left, bottom), c_out: None },
+            ],
+            is_closed: true,
+        }
+    }
+}
+
+impl Curve {
+    pub const fn new() -> Self {
+        Self {
+            points: Vec::new(),
+            is_closed: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct Group {
     pub layers: Vec<Layer>,
 }
 
 #[derive(Debug)]
 pub enum LayerContent {
-    Path(VectorPath),
+    Curve(Curve),
     Group(Group),
 }
 
 #[derive(Debug)]
 pub struct Layer {
     pub name: String,
-    pub content: VectorPath,
+    pub content: LayerContent,
     pub style: Arc<RwLock<Style>>,
 }
 
@@ -213,22 +256,45 @@ impl Artboard {
 
 #[derive(Debug)]
 pub struct Document {
+    pub rtextures: Vec<ArcRTex>,
+    pub styles: Vec<ArcStyle>,
+    pub curves: Vec<ArcCurve>,
+
     pub file_path: Option<PathBuf>,
     pub title: String,
     pub paper_color: Color,
-    pub layers: Vec<Box<Layer>>,
-    pub artboards: Vec<Box<Artboard>>,
+    pub layers: Vec<Layer>,
+    pub artboards: Vec<Artboard>,
 }
 
 impl Document {
     pub const fn new(title: String) -> Self {
         Self {
+            rtextures: Vec::new(),
+            styles: Vec::new(),
+            curves: Vec::new(),
+
             file_path: None,
             title,
             paper_color: Color::GRAY,
             layers: Vec::new(),
             artboards: Vec::new(),
         }
+    }
+
+    pub fn create_style(&mut self, style: Style) -> &ArcStyle {
+        self.styles.push(Arc::new(ReentrantMutex::new(RefCell::new(style))));
+        self.styles.last().expect("should have at least one element after push")
+    }
+
+    pub fn create_render_texture(&mut self, rtex: RenderTexture2D) -> &ArcRTex {
+        self.rtextures.push(Arc::new(ReentrantMutex::new(RefCell::new(rtex))));
+        self.rtextures.last().expect("should have at least one element after push")
+    }
+
+    pub fn create_curve(&mut self, curve: Curve) -> &ArcCurve {
+        self.curves.push(Arc::new(ReentrantMutex::new(RefCell::new(curve))));
+        self.curves.last().expect("should have at least one element after push")
     }
 }
 
@@ -254,11 +320,11 @@ pub struct Editor {
     pub selection: Vec<Selection>,
     pub current_tool: Tool,
     pub camera: Camera2D,
-    pub current_style: Style,
+    pub current_style: Weak<ReentrantMutex<RefCell<Style>>>,
 }
 
 impl Editor {
-    pub const fn new(document: Document) -> Self {
+    pub const fn new(document: Document, current_style: Weak<ReentrantMutex<RefCell<Style>>>) -> Self {
         Self {
             document,
             selection: Vec::new(),
@@ -269,7 +335,7 @@ impl Editor {
                 rotation: 0.0,
                 zoom: 1.0,
             },
-            current_style: Style::new(),
+            current_style,
         }
     }
 }
@@ -299,7 +365,7 @@ impl EngineTheme {
 
 #[derive(Debug)]
 pub struct Engine {
-    pub editors: Vec<Box<Editor>>,
+    pub editors: Vec<Editor>,
     pub theme: EngineTheme,
     pub focused_editor: Option<u32>,
 }
@@ -314,7 +380,7 @@ impl Engine {
     }
 
     /// Pushes the editor and focuses it
-    pub fn create_editor(&mut self, editor: Box<Editor>) {
+    pub fn create_editor(&mut self, editor: Editor) {
         self.editors.push(editor);
         self.focused_editor = Some(self.editors.len() as u32 - 1);
     }
@@ -334,18 +400,59 @@ fn main() {
     let mut engine = Engine::new();
     {
         let mut document = Document::new("untitled".to_owned());
-        let artboard = Box::new(Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0)));
+        let artboard = Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0));
+        let style0 = Arc::downgrade(document.create_style(Style::default_style()));
         document.artboards.push(artboard);
-        let editor = Box::new(Editor::new(document));
+        let editor = Editor::new(document, style0);
         engine.create_editor(editor);
     }
 
     while !rl.window_should_close() {
         if let Some(focused_editor) = &engine.focused_editor {
-            let editor = engine.editors[*focused_editor as usize].as_mut();
-            let scroll: Vector2 = rl.get_mouse_wheel_move_v().into();
-            editor.camera.target -= scroll;
-            editor.camera.offset += scroll;
+            let editor = &mut engine.editors[*focused_editor as usize];
+
+            if rl.is_key_pressed(KEY_P) {
+                editor.current_tool = Tool::PointSelect;
+            } else if rl.is_key_pressed(KEY_B) {
+                if rl.is_key_down(KEY_LEFT_SHIFT) {
+                    editor.current_tool = Tool::VectorBrush;
+                } else {
+                    editor.current_tool = Tool::RasterBrush;
+                }
+            } else if rl.is_key_pressed(KEY_V) {
+                editor.current_tool = Tool::PointSelect;
+            }
+
+            // zoom and pan
+            {
+                let mut pan = Vector2::zero();
+
+                let mut scroll = Vector2::from(rl.get_mouse_wheel_move_v());
+                if rl.is_key_down(KEY_LEFT_ALT) {
+                    const ZOOM_SPEED: f32 = 1.5;
+                    const MIN_ZOOM: f32 = 0.125;
+                    const MAX_ZOOM: f32 = 64.0;
+                    let zoom = if scroll.x.abs() < scroll.y.abs() { scroll.y } else { scroll.x };
+                    if zoom > 0.0 && editor.camera.zoom < MAX_ZOOM {
+                        editor.camera.zoom *= ZOOM_SPEED;
+                    } else if zoom < 0.0 && editor.camera.zoom > MIN_ZOOM {
+                        editor.camera.zoom /= ZOOM_SPEED;
+                    }
+                } else {
+                    if rl.is_key_down(KEY_LEFT_SHIFT) {
+                        std::mem::swap(&mut scroll.x, &mut scroll.y);
+                    }
+                    pan += scroll * 20.0;
+                }
+                if rl.is_mouse_button_down(MOUSE_BUTTON_MIDDLE) {
+                    let drag = rl.get_mouse_delta();
+                    pan += drag;
+                }
+
+                editor.camera.target += (rl.get_mouse_delta() - pan) / editor.camera.zoom;
+                editor.camera.offset = rl.get_mouse_position();
+            }
+
             match editor.current_tool {
                 Tool::PointSelect => {
 
@@ -368,7 +475,7 @@ fn main() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(engine.theme.color_background);
 
-        for (i, editor) in engine.editors.iter().map(Box::as_ref).enumerate() {
+        for (i, editor) in engine.editors.iter().enumerate() {
             {
                 let mut d = d.begin_mode2D(editor.camera);
                 for artboard in &editor.document.artboards {
@@ -405,7 +512,7 @@ fn main() {
         const TAB_MAX_WIDTH: f32 = 100.0;
         let mut tab_rect = Rectangle::new(0.0, 0.0, d.get_render_width() as f32, engine.theme.font_size as f32 + TAB_PADDING_V * 2.0);
         d.draw_rectangle_rec(tab_rect, engine.theme.color_panel_edge);
-        for (i, editor) in engine.editors.iter().map(Box::as_ref).enumerate() {
+        for (i, editor) in engine.editors.iter().enumerate() {
             let tab_name = editor.document.title.as_str();
             let name_width = d.measure_text(tab_name, engine.theme.font_size) as f32 + TAB_PADDING_H * 2.0;
             tab_rect.width = name_width.min(TAB_MAX_WIDTH);
