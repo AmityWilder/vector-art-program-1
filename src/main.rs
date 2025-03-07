@@ -1,8 +1,8 @@
 #![feature(let_chains, if_let_guard, arbitrary_self_types)]
 
-use std::{cell::RefCell, path::PathBuf, sync::{Arc, RwLock, Weak}};
+use std::{cell::RefCell, ffi::CString, path::PathBuf, str::FromStr, sync::{Arc, RwLock, Weak}};
 use parking_lot::ReentrantMutex;
-use raylib::prelude::{*, KeyboardKey::*, MouseButton::*};
+use raylib::{ffi::MeasureText, prelude::{KeyboardKey::*, MouseButton::*, *}};
 
 pub type ArcRTex = Arc<ReentrantMutex<RefCell<RenderTexture2D>>>;
 pub type WeakRTex = Weak<ReentrantMutex<RefCell<RenderTexture2D>>>;
@@ -314,17 +314,40 @@ pub enum Tool {
     RasterBrush,
 }
 
+/// A style that may not be inside a document yet
+#[derive(Debug)]
+pub enum MaybeNewStyle {
+    New(Style),
+    Existing(WeakStyle),
+}
+
+impl Default for MaybeNewStyle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MaybeNewStyle {
+    pub const fn new_default() -> Self {
+        Self::New(Style::default_style())
+    }
+
+    pub const fn new() -> Self {
+        Self::New(Style::new())
+    }
+}
+
 #[derive(Debug)]
 pub struct Editor {
     pub document: Document,
     pub selection: Vec<Selection>,
     pub current_tool: Tool,
     pub camera: Camera2D,
-    pub current_style: Weak<ReentrantMutex<RefCell<Style>>>,
+    pub current_style: MaybeNewStyle,
 }
 
 impl Editor {
-    pub const fn new(document: Document, current_style: Weak<ReentrantMutex<RefCell<Style>>>) -> Self {
+    pub const fn new(document: Document, current_style: MaybeNewStyle) -> Self {
         Self {
             document,
             selection: Vec::new(),
@@ -338,6 +361,12 @@ impl Editor {
             current_style,
         }
     }
+
+    pub fn upgrade_current_style(&mut self) {
+        if let MaybeNewStyle::New(style) = std::mem::take(&mut self.current_style) {
+            self.current_style = MaybeNewStyle::Existing(Arc::downgrade(self.document.create_style(style)))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -347,6 +376,7 @@ pub struct EngineTheme {
     pub color_panel: Color,
     pub color_panel_edge: Color,
     pub color_accent: Color,
+    pub color_danger: Color,
     pub font_size: i32,
 }
 
@@ -358,6 +388,7 @@ impl EngineTheme {
             color_panel: Color::new(48, 48, 48, 255),
             color_panel_edge: Color::new(32, 32, 32, 255),
             color_accent: Color::BLUEVIOLET,
+            color_danger: Color::RED,
             font_size: 10,
         }
     }
@@ -371,6 +402,10 @@ pub struct Engine {
 }
 
 impl Engine {
+    pub const TAB_PADDING_H: f32 = 5.0;
+    pub const TAB_PADDING_V: f32 = 3.0;
+    pub const TAB_MAX_WIDTH: f32 = 100.0;
+
     pub const fn new() -> Self {
         Self {
             editors: Vec::new(),
@@ -383,6 +418,46 @@ impl Engine {
     pub fn create_editor(&mut self, editor: Editor) {
         self.editors.push(editor);
         self.focused_editor = Some(self.editors.len() as u32 - 1);
+    }
+
+    pub fn tab_iter(&self) -> EngineTabIter<'_> {
+        EngineTabIter::new(self.editors.iter(), self.theme.font_size)
+    }
+}
+
+pub struct EngineTabIter<'a> {
+    iter: std::slice::Iter<'a, Editor>,
+    font_size: i32,
+    rect: Rectangle,
+    close_button_rect: Rectangle,
+}
+
+impl<'a> EngineTabIter<'a> {
+    fn new(iter: std::slice::Iter<'a, Editor>, font_size: i32) -> Self {
+        Self {
+            iter,
+            font_size,
+            rect: Rectangle::new(0.0, 0.0, 0.0, font_size as f32 + Engine::TAB_PADDING_V * 2.0),
+            close_button_rect: Rectangle::new(-Engine::TAB_PADDING_H - font_size as f32, Engine::TAB_PADDING_V, font_size as f32, font_size as f32),
+        }
+    }
+}
+
+impl<'a> Iterator for EngineTabIter<'a> {
+    type Item = (&'a str, Rectangle, Rectangle);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(editor) = self.iter.next() {
+            let tab_name = editor.document.title.as_str();
+            let name_width = unsafe { MeasureText(CString::from_str(tab_name).unwrap().as_ptr(), self.font_size) } as f32 + Engine::TAB_PADDING_H * 4.0 + self.font_size as f32;
+            self.rect.width = name_width.min(Engine::TAB_MAX_WIDTH);
+            self.close_button_rect.x += self.rect.width;
+            let (rect, close_button_rect) = (self.rect, self.close_button_rect);
+            self.rect.x += self.rect.width;
+            Some((tab_name, rect, close_button_rect))
+        } else {
+            None
+        }
     }
 }
 
@@ -397,30 +472,63 @@ fn main() {
     rl.set_target_fps(60);
     rl.set_window_state(WindowState::set_window_maximized(rl.get_window_state(), true));
 
+    // initialize engine
     let mut engine = Engine::new();
+    #[cfg(debug_assertions)]
     {
-        let mut document = Document::new("untitled".to_owned());
-        let artboard = Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0));
-        let style0 = Arc::downgrade(document.create_style(Style::default_style()));
-        document.artboards.push(artboard);
-        let editor = Editor::new(document, style0);
-        engine.create_editor(editor);
+        engine.create_editor({
+            Editor::new({
+                let mut document = Document::new("untitled 1".to_owned());
+                let artboard = Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0));
+                document.artboards.push(artboard);
+                document
+            }, MaybeNewStyle::new_default())
+        });
+
+        engine.create_editor({
+            Editor::new({
+                let document = Document::new("untitled 2".to_owned());
+                document
+            }, MaybeNewStyle::new_default())
+        });
     }
 
     while !rl.window_should_close() {
+        // editor tabs
+        {
+            if rl.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) {
+                let mouse_pos = rl.get_mouse_position();
+                if let Some((i, (_, _, close_button_rect))) = engine.tab_iter().enumerate().find(|(_, (_, tab_rect, _))| tab_rect.check_collision_point_rec(mouse_pos)) {
+                    if close_button_rect.check_collision_point_rec(mouse_pos) {
+                        _ = engine.editors.remove(i);
+                        if let Some(focused_editor) = engine.focused_editor && focused_editor >= engine.editors.len() as u32 {
+                            engine.focused_editor = focused_editor.checked_sub(1);
+                        } // otherwise focus the next tab in the array
+                    } else {
+                        engine.focused_editor = Some(i as u32);
+                    }
+                }
+            }
+        }
+
+        // tick editor
         if let Some(focused_editor) = &engine.focused_editor {
             let editor = &mut engine.editors[*focused_editor as usize];
 
-            if rl.is_key_pressed(KEY_P) {
-                editor.current_tool = Tool::PointSelect;
-            } else if rl.is_key_pressed(KEY_B) {
-                if rl.is_key_down(KEY_LEFT_SHIFT) {
-                    editor.current_tool = Tool::VectorBrush;
-                } else {
-                    editor.current_tool = Tool::RasterBrush;
+            // editor inputs
+            {
+                if rl.is_key_pressed(KEY_P) {
+                    editor.current_tool = Tool::PointSelect;
+                } else if rl.is_key_pressed(KEY_B) {
+                    editor.current_tool =
+                        if rl.is_key_down(KEY_LEFT_SHIFT) {
+                            Tool::VectorBrush
+                        } else {
+                            Tool::RasterBrush
+                        }
+                } else if rl.is_key_pressed(KEY_V) {
+                    editor.current_tool = Tool::PointSelect;
                 }
-            } else if rl.is_key_pressed(KEY_V) {
-                editor.current_tool = Tool::PointSelect;
             }
 
             // zoom and pan
@@ -450,7 +558,7 @@ fn main() {
                 }
 
                 editor.camera.target += (rl.get_mouse_delta() - pan) / editor.camera.zoom;
-                editor.camera.offset = rl.get_mouse_position();
+                editor.camera.offset += rl.get_mouse_delta(); // equivalent to `rl.get_mouse_position()` when loading a file
             }
 
             match editor.current_tool {
@@ -472,59 +580,69 @@ fn main() {
             }
         }
 
+        // draw
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(engine.theme.color_background);
 
-        for (i, editor) in engine.editors.iter().enumerate() {
+        // draw focused editor
+        if let Some(focused_editor) = &engine.focused_editor {
+            let editor = &engine.editors[*focused_editor as usize];
+
+            // draw artboard background
             {
                 let mut d = d.begin_mode2D(editor.camera);
                 for artboard in &editor.document.artboards {
                     d.draw_rectangle_rec(artboard.rect, editor.document.paper_color);
                 }
             }
-            if let Some(focused_editor) = &engine.focused_editor && i as u32 == *focused_editor {
-                match editor.current_tool {
-                    Tool::PointSelect => {
 
-                    }
+            // draw artwork
+            {
+                // TODO
+            }
 
-                    Tool::VectorBrush => {
+            // draw tool visuals
+            match editor.current_tool {
+                Tool::PointSelect => {
 
-                    }
+                }
 
-                    Tool::VectorPen => {
+                Tool::VectorBrush => {
 
-                    }
+                }
 
-                    Tool::RasterBrush => {
+                Tool::VectorPen => {
 
-                    }
+                }
+
+                Tool::RasterBrush => {
+
                 }
             }
+
+            // draw artboard name
             for artboard in &editor.document.artboards {
                 let corner = d.get_world_to_screen2D(Vector2::new(artboard.rect.x, artboard.rect.y), editor.camera);
                 d.draw_text(&artboard.name, corner.x as i32, corner.y as i32 - engine.theme.font_size, engine.theme.font_size, engine.theme.color_foreground);
             }
         }
 
-        const TAB_PADDING_H: f32 = 5.0;
-        const TAB_PADDING_V: f32 = 3.0;
-        const TAB_MAX_WIDTH: f32 = 100.0;
-        let mut tab_rect = Rectangle::new(0.0, 0.0, d.get_render_width() as f32, engine.theme.font_size as f32 + TAB_PADDING_V * 2.0);
-        d.draw_rectangle_rec(tab_rect, engine.theme.color_panel_edge);
-        for (i, editor) in engine.editors.iter().enumerate() {
-            let tab_name = editor.document.title.as_str();
-            let name_width = d.measure_text(tab_name, engine.theme.font_size) as f32 + TAB_PADDING_H * 2.0;
-            tab_rect.width = name_width.min(TAB_MAX_WIDTH);
-            let tab_color = if engine.focused_editor.is_some_and(|focused| focused == i as u32)  {
-                engine.theme.color_accent
+        // draw editor tabs
+        for (i, (tab_name, tab_rect, close_button_rect)) in engine.tab_iter().enumerate() {
+            let (tab_color, close_color) = if engine.focused_editor.is_some_and(|focused| focused == i as u32)  {
+                (engine.theme.color_accent, engine.theme.color_panel)
             } else {
-                engine.theme.color_panel
+                (engine.theme.color_panel, engine.theme.color_panel_edge)
             };
             d.draw_rectangle_rec(tab_rect, tab_color);
-            d.draw_text(tab_name, (tab_rect.x + TAB_PADDING_H) as i32, (tab_rect.y + TAB_PADDING_V) as i32, engine.theme.font_size, engine.theme.color_foreground);
-
-            tab_rect.x += tab_rect.width;
+            d.draw_text(
+                tab_name,
+                (tab_rect.x + Engine::TAB_PADDING_H) as i32,
+                (tab_rect.y + Engine::TAB_PADDING_V) as i32,
+                engine.theme.font_size,
+                engine.theme.color_foreground,
+            );
+            d.draw_rectangle_rec(close_button_rect, close_color);
         }
     }
 }
