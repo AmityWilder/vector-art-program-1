@@ -3,8 +3,8 @@ use parking_lot::ReentrantMutex;
 use raylib::prelude::*;
 use crate::{curve::Curve, style::StrongStyle};
 
-pub type StrongRenderTexture2D = Arc<ReentrantMutex<RefCell<RenderTexture2D>>>;
-pub type WeakRenderTexture2D = Weak<ReentrantMutex<RefCell<RenderTexture2D>>>;
+pub type StrongRenderTexture2D =  Arc<ReentrantMutex<RefCell<RenderTexture2D>>>;
+pub type WeakRenderTexture2D   = Weak<ReentrantMutex<RefCell<RenderTexture2D>>>;
 
 #[derive(Debug, Default)]
 pub struct Group {

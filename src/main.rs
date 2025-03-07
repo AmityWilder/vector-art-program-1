@@ -61,6 +61,10 @@ fn main() {
                                 }, MaybeNewStyle::new_default())
                             });
                         }
+
+                        EngineTabData::Open => {
+                            todo!()
+                        }
                     }
                 }
             }
@@ -114,6 +118,7 @@ fn main() {
                 editor.camera.offset += rl.get_mouse_delta(); // equivalent to `rl.get_mouse_position()` when loading a file
             }
 
+            // tick current tool
             match editor.current_tool {
                 Tool::PointSelect => {
 
@@ -216,7 +221,7 @@ fn main() {
                     );
                 }
 
-                EngineTabData::New => {
+                EngineTabData::New | EngineTabData::Open => {
                     let tab_color = if is_hovered {
                         engine.theme.color_accent
                     } else {
@@ -225,7 +230,11 @@ fn main() {
 
                     d.draw_rectangle_rec(tab.rect, tab_color);
                     d.draw_text(
-                        "+",
+                        match tab.data {
+                            EngineTabData::Editor { .. } => unreachable!(),
+                            EngineTabData::New => "+",
+                            EngineTabData::Open => "o",
+                        },
                         (tab.rect.x + Engine::TAB_PADDING_H) as i32,
                         (tab.rect.y + Engine::TAB_PADDING_V) as i32,
                         engine.theme.font_size,

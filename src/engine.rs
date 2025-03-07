@@ -141,6 +141,7 @@ pub enum EngineTabData<'a> {
         close_button_rect: Rectangle,
     },
     New,
+    Open,
 }
 
 pub struct EngineTab<'a> {
@@ -154,6 +155,7 @@ enum EngineTabIterData {
         close_button_rect: Rectangle,
     },
     New,
+    Open,
 }
 
 pub struct EngineTabIter<'a> {
@@ -212,18 +214,23 @@ impl<'a> Iterator for EngineTabIter<'a> {
             })
         } else {
             match self.data {
-                EngineTabIterData::Editor { .. } => {
-                    self.data = EngineTabIterData::New;
+                EngineTabIterData::Editor { .. } | EngineTabIterData::New => {
+                    let data;
+                    (self.data, data) = match self.data {
+                        EngineTabIterData::Editor { .. } => (EngineTabIterData::New, EngineTabData::New),
+                        EngineTabIterData::New => (EngineTabIterData::Open, EngineTabData::Open),
+                        EngineTabIterData::Open => unreachable!(),
+                    };
                     self.rect.width = self.rect.height;
                     let rect = self.rect;
                     self.rect.x += self.rect.width + 1.0;
                     Some(EngineTab {
                         rect,
-                        data: EngineTabData::New,
+                        data,
                     })
                 }
 
-                EngineTabIterData::New => {
+                EngineTabIterData::Open => {
                     None
                 }
             }

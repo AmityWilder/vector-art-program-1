@@ -174,5 +174,5 @@ impl Style {
     }
 }
 
-pub type StrongStyle = Arc<ReentrantMutex<RefCell<Style>>>;
-pub type WeakStyle = Weak<ReentrantMutex<RefCell<Style>>>;
+pub type StrongStyle =  Arc<ReentrantMutex<RefCell<Style>>>;
+pub type WeakStyle   = Weak<ReentrantMutex<RefCell<Style>>>;
