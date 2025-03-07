@@ -1,4 +1,4 @@
-use std::{ffi::CString, num::NonZeroU32, str::FromStr};
+use std::{ffi::CString, str::FromStr};
 use raylib::{ffi::MeasureText, prelude::*};
 
 use crate::Editor;
@@ -32,8 +32,8 @@ impl EngineTheme {
 pub struct Engine {
     pub theme: EngineTheme,
     editors: Vec<Editor>,
-    /// one-indexed instead of zero-indexed
-    focused_editor: Option<NonZeroU32>,
+    /// The editor currently receiving mouse/keyboard events.
+    focused_editor: Option<u32>,
 }
 
 impl Engine {
@@ -52,7 +52,7 @@ impl Engine {
     /// Pushes the editor and focuses it
     pub fn create_editor(&mut self, editor: Editor) {
         self.editors.push(editor);
-        self.focused_editor = NonZeroU32::new(self.editors.len() as u32);
+        self.focused_editor = (self.editors.len() as u32).checked_sub(1);
     }
 
     #[inline]
@@ -80,7 +80,7 @@ impl Engine {
     #[must_use]
     pub fn focus_editor(&mut self, idx: u32) -> Option<()> {
         if idx < self.editors.len() as u32 {
-            self.focused_editor = NonZeroU32::new(idx.checked_add(1).expect("4,294,967,295 editors is too many"));
+            self.focused_editor = Some(idx);
             Some(())
         } else {
             None
@@ -93,15 +93,15 @@ impl Engine {
     }
 
     pub fn focused_editor_index_eq(&self, idx: u32) -> bool {
-        self.focused_editor.is_some_and(|focused| (focused.get() - 1) == idx)
+        self.focused_editor.is_some_and(|focused| focused == idx)
     }
 
     pub fn focused_editor(&self) -> Option<&Editor> {
-        self.focused_editor.map(|idx| &self.editors[(idx.get() - 1) as usize])
+        self.focused_editor.map(|idx| &self.editors[idx as usize])
     }
 
     pub fn focused_editor_mut(&mut self) -> Option<&mut Editor> {
-        self.focused_editor.map(|idx| &mut self.editors[(idx.get() - 1) as usize])
+        self.focused_editor.map(|idx| &mut self.editors[idx as usize])
     }
 
     /// Removes the editor at the index and returns it.
@@ -115,10 +115,10 @@ impl Engine {
         let editor = self.editors.remove(index as usize);
         let num_editors = self.editors.len() as u32;
         if let Some(focused_editor) = &self.focused_editor {
-            if focused_editor.get() > num_editors {
-                self.focused_editor = NonZeroU32::new(num_editors)
-            } else if focused_editor.get() > index + 1 {
-                self.focused_editor = NonZeroU32::new(focused_editor.get() - 1);
+            if *focused_editor >= num_editors {
+                self.focused_editor = num_editors.checked_sub(1)
+            } else if index < *focused_editor {
+                self.focused_editor = Some(focused_editor - 1);
             }
         }
         editor
@@ -134,11 +134,33 @@ impl Engine {
     }
 }
 
+pub enum EngineTabData<'a> {
+    Editor {
+        index: u32,
+        editor: &'a Editor,
+        close_button_rect: Rectangle,
+    },
+    New,
+}
+
+pub struct EngineTab<'a> {
+    pub rect: Rectangle,
+    pub data: EngineTabData<'a>,
+}
+
+enum EngineTabIterData {
+    Editor {
+        index: u32,
+        close_button_rect: Rectangle,
+    },
+    New,
+}
+
 pub struct EngineTabIter<'a> {
     iter: std::slice::Iter<'a, Editor>,
     font_size: i32,
     rect: Rectangle,
-    close_button_rect: Rectangle,
+    data: EngineTabIterData,
 }
 
 impl<'a> EngineTabIter<'a> {
@@ -146,27 +168,65 @@ impl<'a> EngineTabIter<'a> {
         Self {
             iter,
             font_size,
-            rect: Rectangle::new(0.0, 0.0, 0.0, font_size as f32 + Engine::TAB_PADDING_V * 2.0),
-            close_button_rect: Rectangle::new(-Engine::TAB_PADDING_H - font_size as f32, Engine::TAB_PADDING_V, font_size as f32, font_size as f32),
+            rect: Rectangle::new(
+                0.0,
+                0.0,
+                0.0,
+                font_size as f32 + Engine::TAB_PADDING_V * 2.0,
+            ),
+            data: EngineTabIterData::Editor {
+                index: 0,
+                close_button_rect: Rectangle::new(
+                    -Engine::TAB_PADDING_H - font_size as f32,
+                    Engine::TAB_PADDING_V,
+                    font_size as f32,
+                    font_size as f32,
+                ),
+            }
         }
     }
 }
 
 impl<'a> Iterator for EngineTabIter<'a> {
-    type Item = (&'a str, Rectangle, Rectangle);
+    type Item = EngineTab<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(editor) = self.iter.next() {
+            let EngineTabIterData::Editor { index, close_button_rect } = &mut self.data else { panic!("every tabs at the start should be an editor tab") };
             let tab_name = editor.document.title.as_str();
             let name_width = unsafe { MeasureText(CString::from_str(tab_name).unwrap().as_ptr(), self.font_size) } as f32;
             let tab_width = name_width + Engine::TAB_PADDING_H * 4.0 + self.font_size as f32;
             self.rect.width = tab_width.min(Engine::TAB_MAX_WIDTH);
-            self.close_button_rect.x += self.rect.width;
-            let (rect, close_button_rect) = (self.rect, self.close_button_rect);
-            self.rect.x += self.rect.width;
-            Some((tab_name, rect, close_button_rect))
+            close_button_rect.x += self.rect.width;
+            let (idx, rect, close_rec) = (*index, self.rect, *close_button_rect);
+            *index += 1;
+            self.rect.x += self.rect.width + 1.0;
+            close_button_rect.x += 1.0;
+            Some(EngineTab {
+                rect,
+                data: EngineTabData::Editor {
+                    index: idx,
+                    editor,
+                    close_button_rect: close_rec,
+                },
+            })
         } else {
-            None
+            match self.data {
+                EngineTabIterData::Editor { .. } => {
+                    self.data = EngineTabIterData::New;
+                    self.rect.width = self.rect.height;
+                    let rect = self.rect;
+                    self.rect.x += self.rect.width + 1.0;
+                    Some(EngineTab {
+                        rect,
+                        data: EngineTabData::New,
+                    })
+                }
+
+                EngineTabIterData::New => {
+                    None
+                }
+            }
         }
     }
 }

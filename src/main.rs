@@ -2,7 +2,7 @@
 #![warn(arithmetic_overflow, clippy::arithmetic_side_effects)]
 
 use std::{cell::RefCell, path::PathBuf, sync::{Arc, RwLock, Weak}};
-use engine::Engine;
+use engine::{Engine, EngineTab, EngineTabData};
 use parking_lot::ReentrantMutex;
 use raylib::prelude::{KeyboardKey::*, MouseButton::*, *};
 
@@ -390,35 +390,12 @@ fn main() {
     {
         engine.create_editor({
             Editor::new({
-                let mut document = Document::new("untitled 1".to_owned());
+                let mut document = Document::new("untitled".to_owned());
                 let artboard = Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0));
                 document.artboards.push(artboard);
                 document
             }, MaybeNewStyle::new_default())
         });
-
-        engine.create_editor({
-            Editor::new({
-                let document = Document::new("untitled 2".to_owned());
-                document
-            }, MaybeNewStyle::new_default())
-        });
-
-        engine.create_editor({
-            Editor::new({
-                let document = Document::new("untitled 3".to_owned());
-                document
-            }, MaybeNewStyle::new_default())
-        });
-
-        engine.create_editor({
-            Editor::new({
-                let document = Document::new("untitled 4".to_owned());
-                document
-            }, MaybeNewStyle::new_default())
-        });
-
-        engine.focus_editor(0).expect("should have at least one editor at this point");
     }
 
     while !rl.window_should_close() {
@@ -426,11 +403,24 @@ fn main() {
         {
             if rl.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) {
                 let mouse_pos = rl.get_mouse_position();
-                if let Some((i, (_, _, close_button_rect))) = engine.tab_iter().enumerate().find(|(_, (_, tab_rect, _))| tab_rect.check_collision_point_rec(mouse_pos)) {
-                    if close_button_rect.check_collision_point_rec(mouse_pos) {
-                        _ = engine.remove_editor(i as u32);
-                    } else {
-                        engine.focus_editor(i as u32).expect("tab_iter should only iterate over valid indices");
+                if let Some(EngineTab { data, .. }) = engine.tab_iter().find(|tab| tab.rect.check_collision_point_rec(mouse_pos)) {
+                    match data {
+                        EngineTabData::Editor { index, close_button_rect, .. } => {
+                            if close_button_rect.check_collision_point_rec(mouse_pos) {
+                                _ = engine.remove_editor(index);
+                            } else {
+                                engine.focus_editor(index).expect("tab_iter should only iterate over valid indices");
+                            }
+                        }
+
+                        EngineTabData::New => {
+                            engine.create_editor({
+                                Editor::new({
+                                    let document = Document::new("untitled".to_owned());
+                                    document
+                                }, MaybeNewStyle::new_default())
+                            });
+                        }
                     }
                 }
             }
@@ -550,21 +540,59 @@ fn main() {
 
         // draw editor tabs
         d.draw_rectangle_rec(engine.tab_well(d.get_render_width() as f32), engine.theme.color_panel_edge);
-        for (i, (tab_name, tab_rect, close_button_rect)) in engine.tab_iter().enumerate() {
-            let (tab_color, close_color) = if engine.focused_editor_index_eq(i as u32) {
-                (engine.theme.color_accent, engine.theme.color_panel)
-            } else {
-                (engine.theme.color_panel, engine.theme.color_panel_edge)
-            };
-            d.draw_rectangle_rec(tab_rect, tab_color);
-            d.draw_text(
-                tab_name,
-                (tab_rect.x + Engine::TAB_PADDING_H) as i32,
-                (tab_rect.y + Engine::TAB_PADDING_V) as i32,
-                engine.theme.font_size,
-                engine.theme.color_foreground,
-            );
-            d.draw_rectangle_rec(close_button_rect, close_color);
+        for tab in engine.tab_iter() {
+            let is_hovered = tab.rect.check_collision_point_rec(d.get_mouse_position());
+            match tab.data {
+                EngineTabData::Editor { index, editor, close_button_rect } => {
+                    let is_close_button_hovered = is_hovered && close_button_rect.check_collision_point_rec(d.get_mouse_position());
+                    let is_focused = engine.focused_editor_index_eq(index);
+
+                    let tab_color = if is_focused {
+                        engine.theme.color_accent
+                    } else if is_hovered {
+                        engine.theme.color_panel_edge
+                    } else {
+                        engine.theme.color_panel
+                    };
+
+                    let close_color = if is_close_button_hovered {
+                        engine.theme.color_danger
+                    } else if is_focused {
+                        engine.theme.color_foreground
+                    } else if is_hovered {
+                        engine.theme.color_panel
+                    } else {
+                        engine.theme.color_panel_edge
+                    };
+
+                    d.draw_rectangle_rec(tab.rect, tab_color);
+                    d.draw_rectangle_rec(close_button_rect, close_color);
+                    d.draw_text(
+                        &editor.document.title,
+                        (tab.rect.x + Engine::TAB_PADDING_H) as i32,
+                        (tab.rect.y + Engine::TAB_PADDING_V) as i32,
+                        engine.theme.font_size,
+                        engine.theme.color_foreground,
+                    );
+                }
+
+                EngineTabData::New => {
+                    let tab_color = if is_hovered {
+                        engine.theme.color_accent
+                    } else {
+                        engine.theme.color_panel
+                    };
+
+                    d.draw_rectangle_rec(tab.rect, tab_color);
+                    d.draw_text(
+                        "+",
+                        (tab.rect.x + Engine::TAB_PADDING_H) as i32,
+                        (tab.rect.y + Engine::TAB_PADDING_V) as i32,
+                        engine.theme.font_size,
+                        engine.theme.color_foreground,
+                    );
+                }
+            }
         }
     }
 }
