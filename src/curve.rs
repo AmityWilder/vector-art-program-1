@@ -74,7 +74,7 @@ impl<'a> Iterator for FlatCurveIter<'a> {
         debug_assert!(self.offset <= 3);
         if self.offset == 3 {
             let item = self.iter.next()?;
-            self.buffer = [item.c_in, item.p, item.c_out];
+            self.buffer = [item.p + item.c_in, item.p, item.p + item.c_out];
             self.offset = 0;
         }
         let idx = self.offset;
@@ -166,8 +166,15 @@ impl<'a> Iterator for Subdivided<'a> {
             self.i = 0;
         }
         let t = self.i as f32 * STEP;
+        self.i += 1;
         let T = na::Matrix1x4::new(t*t*t, t*t, t, 1.0);
         Some((T*M_B*self.G).transpose())
+    }
+}
+
+impl ExactSizeIterator for Subdivided<'_> {
+    fn len(&self) -> usize {
+        (self.iter.len() + 1) * SPLINE_DIVISIONS_PER_SEGMENT as usize - self.i as usize
     }
 }
 
@@ -291,6 +298,11 @@ mod test {
     use super::*;
     use crate::make_curve;
 
+    static RL_MUX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn rl_lock() -> std::sync::MutexGuard<'static, ()> {
+        RL_MUX.lock().unwrap_or_else(|x| { RL_MUX.clear_poison(); x.into_inner() })
+    }
+
     macro_rules! vector_arr {
         ($(($x:expr,$y:expr)),* $(,)?) => {
             [$(na::Vector2::new($x as f32, $y as f32)),*]
@@ -338,7 +350,7 @@ mod test {
         let points = iter.collect::<Vec<_>>();
         assert_eq!(points.len(), curve.points.len() * 3);
 
-        assert_eq!(&points[..], &vector_arr![(0,1),(2,3),(4,5),(6,7),(8,9),(10,11),(12,13),(14,15),(16,17)]);
+        assert_eq!(&points[..], &vector_arr![(2+0,3+1),(2,3),(2+4,3+5),(8+6,9+7),(8,9),(8+10,9+11),(14+12,15+13),(14,15),(14+16,15+17)]);
     }
 
     #[test]
@@ -351,7 +363,7 @@ mod test {
         let points = iter.collect::<Vec<_>>();
         assert_eq!(points.len(), (curve.points.len() + 1) * 3);
 
-        assert_eq!(&points[..], &vector_arr![(0,1),(2,3),(4,5),(6,7),(8,9),(10,11),(12,13),(14,15),(16,17),(0,1),(2,3),(4,5)]);
+        assert_eq!(&points[..], &vector_arr![(2+0,3+1),(2,3),(2+4,3+5),(8+6,9+7),(8,9),(8+10,9+11),(14+12,15+13),(14,15),(14+16,15+17),(2+0,3+1),(2,3),(2+4,3+5)]);
     }
 
     #[test]
@@ -364,8 +376,8 @@ mod test {
         let points = iter.collect::<Vec<_>>();
         assert_eq!(points.len(), curve.points.len() - 1);
 
-        assert_eq!(&points[0], &vector_arr![(2,3),(4,5),(6,7),(8,9)]);
-        assert_eq!(&points[1], &vector_arr![(8,9),(10,11),(12,13),(14,15)]);
+        assert_eq!(&points[0], &vector_arr![(2,3),(2+4,3+5),(8+6,9+7),(8,9)]);
+        assert_eq!(&points[1], &vector_arr![(8,9),(8+10,9+11),(14+12,15+13),(14,15)]);
     }
 
     #[test]
@@ -378,9 +390,91 @@ mod test {
         let points = iter.collect::<Vec<_>>();
         assert_eq!(points.len(), curve.points.len());
 
-        assert_eq!(&points[0], &vector_arr![(2,3),(4,5),(6,7),(8,9)]);
-        assert_eq!(&points[1], &vector_arr![(8,9),(10,11),(12,13),(14,15)]);
-        assert_eq!(&points[2], &vector_arr![(14,15),(16,17),(0,1),(2,3)]);
+        assert_eq!(&points[0], &vector_arr![(2,3),(2+4,3+5),(8+6,9+7),(8,9)]);
+        assert_eq!(&points[1], &vector_arr![(8,9),(8+10,9+11),(14+12,15+13),(14,15)]);
+        assert_eq!(&points[2], &vector_arr![(14,15),(14+16,15+17),(2+0,3+1),(2,3)]);
+    }
+
+    #[test]
+    fn test_subdivided_iter() {
+        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
+        let expected_count = (curve.points.len() - 1) * SPLINE_DIVISIONS_PER_SEGMENT as usize;
+
+        let iter = curve.subdivided();
+        assert_eq!(iter.len(), expected_count);
+
+        let points = iter.collect::<Vec<_>>();
+        assert_eq!(points.len(), expected_count);
+    }
+
+    #[test]
+    fn test_subdivided_iter_cyclic() {
+        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
+        let expected_count = (curve.points.len()) * SPLINE_DIVISIONS_PER_SEGMENT as usize;
+
+        let iter = curve.subdivided();
+        assert_eq!(iter.len(), expected_count);
+
+        let points = iter.collect::<Vec<_>>();
+        assert_eq!(points.len(), expected_count);
+    }
+
+    #[test]
+    fn test_subdivided_iter_positions() {
+        let mut success = false;
+        {
+            let _lock = rl_lock();
+            let (mut rl, thread) = init()
+                .title("test_subdivided_iter")
+                .build();
+            rl.set_target_fps(60);
+            let curve = make_curve!([-50,0](60,300)[50,0]->[-50,0](320,100)[50,0]->[-50,0](580,300)[50,0]);
+            let mut buffer_actual = Vec::new();
+            while !rl.window_should_close() {
+
+                buffer_actual.clear();
+                buffer_actual.extend(curve.subdivided().map(Vector2::from));
+
+                let mut d = rl.begin_drawing(&thread);
+                d.clear_background(Color::RAYWHITE);
+
+                // draw expected
+                d.draw_spline_segment_bezier_cubic(
+                    Vector2::from(curve.points[0].p),
+                    Vector2::from(curve.points[0].p + curve.points[0].c_out),
+                    Vector2::from(curve.points[1].p + curve.points[1].c_in),
+                    Vector2::from(curve.points[1].p),
+                    5.0,
+                    Color::GREEN.alpha(0.5),
+                );
+                d.draw_spline_segment_bezier_cubic(
+                    Vector2::from(curve.points[1].p),
+                    Vector2::from(curve.points[1].p + curve.points[1].c_out),
+                    Vector2::from(curve.points[2].p + curve.points[2].c_in),
+                    Vector2::from(curve.points[2].p),
+                    5.0,
+                    Color::GREEN.alpha(0.5),
+                );
+
+                // draw actual
+                d.draw_line_strip(&buffer_actual[..], Color::MAGENTA);
+
+                for point in &curve.points {
+                    let p = Vector2::from(point.p);
+                    let p_in = Vector2::from(point.p + point.c_in);
+                    let p_out = Vector2::from(point.p + point.c_out);
+                    d.draw_line_v(p, p_in, Color::GRAY.alpha(0.5));
+                    d.draw_line_v(p, p_out, Color::GRAY.alpha(0.5));
+                    d.draw_ring(p, 9.0, 11.0, 0.0, 360.0, 30, Color::RED);
+                    d.draw_ring(p_in,  4.0, 6.0, 0.0, 360.0, 20, Color::BLUE);
+                    d.draw_ring(p_out, 4.0, 6.0, 0.0, 360.0, 20, Color::BLUE);
+                }
+
+                d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 54.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
+                d.gui_check_box(Rectangle::new(5.0, 5.0, 15.0, 15.0), Some(if success { c"pass" } else { c"fail" }), &mut success);
+            }
+        }
+        assert!(success, "manually failed");
     }
 
     // #[test]
