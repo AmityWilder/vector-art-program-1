@@ -1,8 +1,12 @@
 #![feature(let_chains, if_let_guard, arbitrary_self_types)]
+#![warn(arithmetic_overflow, clippy::arithmetic_side_effects)]
 
-use std::{cell::RefCell, ffi::CString, path::PathBuf, str::FromStr, sync::{Arc, RwLock, Weak}};
+use std::{cell::RefCell, path::PathBuf, sync::{Arc, RwLock, Weak}};
+use engine::Engine;
 use parking_lot::ReentrantMutex;
-use raylib::{ffi::MeasureText, prelude::{KeyboardKey::*, MouseButton::*, *}};
+use raylib::prelude::{KeyboardKey::*, MouseButton::*, *};
+
+pub mod engine;
 
 pub type ArcRTex = Arc<ReentrantMutex<RefCell<RenderTexture2D>>>;
 pub type WeakRTex = Weak<ReentrantMutex<RefCell<RenderTexture2D>>>;
@@ -369,98 +373,6 @@ impl Editor {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EngineTheme {
-    pub color_background: Color,
-    pub color_foreground: Color,
-    pub color_panel: Color,
-    pub color_panel_edge: Color,
-    pub color_accent: Color,
-    pub color_danger: Color,
-    pub font_size: i32,
-}
-
-impl EngineTheme {
-    pub const fn default_theme() -> Self {
-        Self {
-            color_background: Color::new(24, 24, 24, 255),
-            color_foreground: Color::new(200, 200, 200, 255),
-            color_panel: Color::new(48, 48, 48, 255),
-            color_panel_edge: Color::new(32, 32, 32, 255),
-            color_accent: Color::BLUEVIOLET,
-            color_danger: Color::RED,
-            font_size: 10,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Engine {
-    pub editors: Vec<Editor>,
-    pub theme: EngineTheme,
-    pub focused_editor: Option<u32>,
-}
-
-impl Engine {
-    pub const TAB_PADDING_H: f32 = 5.0;
-    pub const TAB_PADDING_V: f32 = 3.0;
-    pub const TAB_MAX_WIDTH: f32 = 100.0;
-
-    pub const fn new() -> Self {
-        Self {
-            editors: Vec::new(),
-            theme: EngineTheme::default_theme(),
-            focused_editor: None,
-        }
-    }
-
-    /// Pushes the editor and focuses it
-    pub fn create_editor(&mut self, editor: Editor) {
-        self.editors.push(editor);
-        self.focused_editor = Some(self.editors.len() as u32 - 1);
-    }
-
-    pub fn tab_iter(&self) -> EngineTabIter<'_> {
-        EngineTabIter::new(self.editors.iter(), self.theme.font_size)
-    }
-}
-
-pub struct EngineTabIter<'a> {
-    iter: std::slice::Iter<'a, Editor>,
-    font_size: i32,
-    rect: Rectangle,
-    close_button_rect: Rectangle,
-}
-
-impl<'a> EngineTabIter<'a> {
-    fn new(iter: std::slice::Iter<'a, Editor>, font_size: i32) -> Self {
-        Self {
-            iter,
-            font_size,
-            rect: Rectangle::new(0.0, 0.0, 0.0, font_size as f32 + Engine::TAB_PADDING_V * 2.0),
-            close_button_rect: Rectangle::new(-Engine::TAB_PADDING_H - font_size as f32, Engine::TAB_PADDING_V, font_size as f32, font_size as f32),
-        }
-    }
-}
-
-impl<'a> Iterator for EngineTabIter<'a> {
-    type Item = (&'a str, Rectangle, Rectangle);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(editor) = self.iter.next() {
-            let tab_name = editor.document.title.as_str();
-            let name_width = unsafe { MeasureText(CString::from_str(tab_name).unwrap().as_ptr(), self.font_size) } as f32 + Engine::TAB_PADDING_H * 4.0 + self.font_size as f32;
-            self.rect.width = name_width.min(Engine::TAB_MAX_WIDTH);
-            self.close_button_rect.x += self.rect.width;
-            let (rect, close_button_rect) = (self.rect, self.close_button_rect);
-            self.rect.x += self.rect.width;
-            Some((tab_name, rect, close_button_rect))
-        } else {
-            None
-        }
-    }
-}
-
 #[allow(clippy::cognitive_complexity, reason = "you always overcomplicate everything when you listen to this about the main function, Amy.")]
 fn main() {
     let (mut rl, thread) = init()
@@ -491,6 +403,22 @@ fn main() {
                 document
             }, MaybeNewStyle::new_default())
         });
+
+        engine.create_editor({
+            Editor::new({
+                let document = Document::new("untitled 3".to_owned());
+                document
+            }, MaybeNewStyle::new_default())
+        });
+
+        engine.create_editor({
+            Editor::new({
+                let document = Document::new("untitled 4".to_owned());
+                document
+            }, MaybeNewStyle::new_default())
+        });
+
+        engine.focus_editor(0).expect("should have at least one editor at this point");
     }
 
     while !rl.window_should_close() {
@@ -500,21 +428,16 @@ fn main() {
                 let mouse_pos = rl.get_mouse_position();
                 if let Some((i, (_, _, close_button_rect))) = engine.tab_iter().enumerate().find(|(_, (_, tab_rect, _))| tab_rect.check_collision_point_rec(mouse_pos)) {
                     if close_button_rect.check_collision_point_rec(mouse_pos) {
-                        _ = engine.editors.remove(i);
-                        if let Some(focused_editor) = engine.focused_editor && focused_editor >= engine.editors.len() as u32 {
-                            engine.focused_editor = focused_editor.checked_sub(1);
-                        } // otherwise focus the next tab in the array
+                        _ = engine.remove_editor(i as u32);
                     } else {
-                        engine.focused_editor = Some(i as u32);
+                        engine.focus_editor(i as u32).expect("tab_iter should only iterate over valid indices");
                     }
                 }
             }
         }
 
         // tick editor
-        if let Some(focused_editor) = &engine.focused_editor {
-            let editor = &mut engine.editors[*focused_editor as usize];
-
+        if let Some(editor) = engine.focused_editor_mut() {
             // editor inputs
             {
                 if rl.is_key_pressed(KEY_P) {
@@ -585,9 +508,7 @@ fn main() {
         d.clear_background(engine.theme.color_background);
 
         // draw focused editor
-        if let Some(focused_editor) = &engine.focused_editor {
-            let editor = &engine.editors[*focused_editor as usize];
-
+        if let Some(editor) = engine.focused_editor() {
             // draw artboard background
             {
                 let mut d = d.begin_mode2D(editor.camera);
@@ -628,8 +549,9 @@ fn main() {
         }
 
         // draw editor tabs
+        d.draw_rectangle_rec(engine.tab_well(d.get_render_width() as f32), engine.theme.color_panel_edge);
         for (i, (tab_name, tab_rect, close_button_rect)) in engine.tab_iter().enumerate() {
-            let (tab_color, close_color) = if engine.focused_editor.is_some_and(|focused| focused == i as u32)  {
+            let (tab_color, close_color) = if engine.focused_editor_index_eq(i as u32) {
                 (engine.theme.color_accent, engine.theme.color_panel)
             } else {
                 (engine.theme.color_panel, engine.theme.color_panel_edge)
