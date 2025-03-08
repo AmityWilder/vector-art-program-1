@@ -9,7 +9,7 @@ pub struct CurvePoint {
     pub c_out: na::Vector2<f32>, // relative to p
 }
 
-struct CurveIter<'a> {
+pub struct CurveIter<'a> {
     iter: std::slice::Iter<'a, CurvePoint>,
     first: Option<&'a CurvePoint>,
     is_closed: bool,
@@ -22,6 +22,11 @@ impl<'a> CurveIter<'a> {
             first: None,
             is_closed,
         }
+    }
+
+    /// Flattens `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]`
+    pub fn spline(self) -> FlatCurveIter<'a> {
+        FlatCurveIter::new(self)
     }
 }
 
@@ -38,20 +43,21 @@ impl<'a> Iterator for CurveIter<'a> {
             self.first.take()
         }
     }
-}
 
-impl ExactSizeIterator for CurveIter<'_> {
-    fn len(&self) -> usize {
+    fn size_hint(&self) -> (usize, Option<usize>) {
         let base_len = self.iter.len();
-        if base_len == 0 {
+        let len = if base_len == 0 {
             self.first.is_some() as usize
         } else {
             base_len + self.is_closed as usize
-        }
+        };
+        (len, Some(len))
     }
 }
 
-struct FlatCurveIter<'a> {
+impl ExactSizeIterator for CurveIter<'_> {}
+
+pub struct FlatCurveIter<'a> {
     iter: CurveIter<'a>,
     buffer: [na::Vector2<f32>; 3],
     offset: u8,
@@ -61,9 +67,14 @@ impl<'a> FlatCurveIter<'a> {
     fn new(iter: CurveIter<'a>) -> Self {
         Self {
             iter,
-            buffer: [na::Vector2::zeros(); 3],
+            buffer: Default::default(),
             offset: 3,
         }
+    }
+
+    /// Iterator over windows; `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]` into `[[p1,c2,c3,p4], [p4,c5,c6,p7], ...]`
+    pub fn spline_windows(self) -> SplineWindows<'a>  {
+        SplineWindows::new(self)
     }
 }
 
@@ -81,15 +92,16 @@ impl<'a> Iterator for FlatCurveIter<'a> {
         self.offset += 1;
         Some(self.buffer[idx as usize])
     }
-}
 
-impl ExactSizeIterator for FlatCurveIter<'_> {
-    fn len(&self) -> usize {
-        (self.iter.len() + 1) * 3 - self.offset as usize
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = (self.iter.len() + 1) * 3 - self.offset as usize;
+        (len, Some(len))
     }
 }
 
-struct SplineWindows<'a> {
+impl ExactSizeIterator for FlatCurveIter<'_> {}
+
+pub struct SplineWindows<'a> {
     is_first: bool,
     iter: FlatCurveIter<'a>,
     buffer: [na::Vector2<f32>; 4],
@@ -100,8 +112,12 @@ impl<'a> SplineWindows<'a> {
         Self {
             is_first: true,
             iter,
-            buffer: [na::Vector2::zeros(); 4],
+            buffer: Default::default(),
         }
+    }
+
+    pub fn samples<const RES: u16>(self) -> Sampled<'a, RES> {
+        Sampled::new(self)
     }
 }
 
@@ -121,60 +137,202 @@ impl<'a> Iterator for SplineWindows<'a> {
         self.buffer[3] = self.iter.next()?;
         Some(self.buffer.clone())
     }
-}
 
-impl ExactSizeIterator for SplineWindows<'_> {
-    fn len(&self) -> usize {
-        self.iter.iter.len() - 1
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.iter.iter.len().saturating_sub(1);
+        (len, Some(len))
     }
 }
 
-const SPLINE_DIVISIONS_PER_SEGMENT: u16 = 40;
+impl ExactSizeIterator for SplineWindows<'_> {}
 
 #[allow(non_snake_case)]
-struct Subdivided<'a> {
+pub struct Sampled<'a, const RES: u16 = 40> {
     iter: SplineWindows<'a>,
+    mat: na::Matrix2x4<f32>,
     i: u16,
-    G: na::Matrix4x2<f32>,
 }
 
-impl<'a> Subdivided<'a> {
+impl<'a, const RES: u16> Sampled<'a, RES> {
+    pub const RESOLUTION: u16 = RES;
+    pub const STEP: f32 = 1.0 / Self::RESOLUTION as f32;
+
     fn new(iter: SplineWindows<'a>) -> Self {
         Self {
             iter,
-            i: SPLINE_DIVISIONS_PER_SEGMENT,
-            G: na::Matrix4x2::zeros(),
+            mat: Default::default(),
+            i: Self::RESOLUTION,
         }
+    }
+
+    fn mat(&self) -> &na::Matrix2x4<f32> {
+        &self.mat
     }
 }
 
-impl<'a> Iterator for Subdivided<'a> {
-    type Item = na::Vector2<f32>;
+impl<'a, const RES: u16> Iterator for Sampled<'a, RES> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i == Self::RESOLUTION {
+            self.i = 0;
+            let vecs = self.iter.next()?;
+            self.mat = na::Matrix::from_columns(&vecs);
+        }
+        let t = self.i as f32 * Self::STEP;
+        self.i += 1;
+        Some(t)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = (self.iter.len() + 1) * Self::RESOLUTION as usize - self.i as usize;
+        (len, Some(len))
+    }
+}
+
+impl<const RES: u16> ExactSizeIterator for Sampled<'_, RES> {}
+
+trait SamplingHelper: Sized + Iterator {
+    const RES: u16;
+    type Sampled: ExactSizeIterator<Item = f32>;
+
+    /// ```no_run
+    /// [[x1, x2, x3, x4]
+    ///  [y1, y2, y3, y4]]
+    /// ```
+    fn mat(&self) -> &na::Matrix2x4<f32>;
+    fn item_sample(item: &Self::Item) -> f32;
+}
+
+impl<'a, const RES: u16> SamplingHelper for Sampled<'a, RES> {
+    const RES: u16 = RES;
+    type Sampled = Self;
+
+    #[inline]
+    fn mat(&self) -> &na::Matrix2x4<f32> {
+        self.mat()
+    }
+
+    #[inline]
+    fn item_sample(item: &Self::Item) -> f32 {
+        *item
+    }
+}
+
+#[allow(private_bounds)]
+pub trait Sampling: SamplingHelper {
+    #[inline]
+    fn with_positions(self) -> Positions<Self> {
+        Positions::new(self)
+    }
+
+    #[inline]
+    fn with_velocities(self) -> Velocities<Self> {
+        Velocities::new(self)
+    }
+}
+
+impl<I: SamplingHelper> Sampling for I {}
+
+#[allow(non_snake_case)]
+pub struct Positions<I> {
+    iter: I,
+}
+
+impl<I> Positions<I> {
+    fn new(iter: I) -> Self {
+        Self { iter }
+    }
+}
+
+const P_COEFS: na::Matrix4<f32> = na::Matrix4::new(
+    -1.0,  3.0, -3.0,  1.0,
+     3.0, -6.0,  3.0,  0.0,
+    -3.0,  3.0,  0.0,  0.0,
+     1.0,  0.0,  0.0,  0.0,
+);
+
+impl<I: SamplingHelper> Iterator for Positions<I> {
+    type Item = (I::Item, na::Vector2<f32>);
 
     #[allow(non_snake_case)]
     fn next(&mut self) -> Option<Self::Item> {
-        const STEP: f32 = 1.0 / SPLINE_DIVISIONS_PER_SEGMENT as f32;
-        const M_B: na::Matrix4<f32> = na::Matrix4::new(
-            -1.0,  3.0, -3.0,  1.0,
-             3.0, -6.0,  3.0,  0.0,
-            -3.0,  3.0,  0.0,  0.0,
-             1.0,  0.0,  0.0,  0.0,
-        );
-        if self.i == SPLINE_DIVISIONS_PER_SEGMENT {
-            let rows = self.iter.next()?.map(|v| v.transpose());
-            self.G = na::Matrix::from_rows(&rows);
-            self.i = 0;
-        }
-        let t = self.i as f32 * STEP;
-        self.i += 1;
-        let T = na::Matrix1x4::new(t*t*t, t*t, t, 1.0);
-        Some((T*M_B*self.G).transpose())
+        let item = self.iter.next()?;
+        let t = I::item_sample(&item);
+        let T = na::Vector4::new(t*t*t, t*t, t, 1.0);
+        Some((item, (self.mat()*P_COEFS*T)))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
     }
 }
 
-impl ExactSizeIterator for Subdivided<'_> {
-    fn len(&self) -> usize {
-        (self.iter.len() + 1) * SPLINE_DIVISIONS_PER_SEGMENT as usize - self.i as usize
+impl<I: SamplingHelper> ExactSizeIterator for Positions<I> {}
+
+impl<I: SamplingHelper> SamplingHelper for Positions<I> {
+    const RES: u16 = I::RES;
+    type Sampled = I::Sampled;
+
+    #[inline]
+    fn mat(&self) -> &na::Matrix2x4<f32> {
+        self.iter.mat()
+    }
+
+    #[inline]
+    fn item_sample(item: &Self::Item) -> f32 {
+        I::item_sample(&item.0)
+    }
+}
+
+#[allow(non_snake_case)]
+pub struct Velocities<I> {
+    iter: I,
+}
+
+impl<I> Velocities<I> {
+    fn new(iter: I) -> Self {
+        Self { iter }
+    }
+}
+
+const V_COEFS: na::Matrix4x3<f32> = na::Matrix4x3::new(
+    -3.0,   6.0, -3.0,
+     9.0, -12.0,  3.0,
+    -9.0,   6.0,  0.0,
+     3.0,   0.0,  0.0,
+);
+
+impl<I: SamplingHelper> Iterator for Velocities<I> {
+    type Item = (I::Item, na::Vector2<f32>);
+
+    #[allow(non_snake_case)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.iter.next()?;
+        let t = I::item_sample(&item);
+        let T = na::Vector3::new(t*t, t, 1.0);
+        Some((item, self.mat()*V_COEFS*T))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<I: SamplingHelper> SamplingHelper for Velocities<I> {
+    const RES: u16 = I::RES;
+    type Sampled = I::Sampled;
+
+    #[inline]
+    fn mat(&self) -> &na::Matrix2x4<f32> {
+        self.iter.mat()
+    }
+
+    #[inline]
+    fn item_sample(item: &Self::Item) -> f32 {
+        I::item_sample(&item.0)
     }
 }
 
@@ -213,35 +371,8 @@ impl Curve {
         }
     }
 
-    fn iter(&self) -> CurveIter<'_> {
+    pub fn iter(&self) -> CurveIter<'_> {
         CurveIter::new(self.points.iter(), self.is_closed)
-    }
-
-    /// Flattens `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]`
-    fn spline(&self) -> FlatCurveIter<'_> {
-        FlatCurveIter::new(self.iter())
-    }
-
-    /// Iterator over windows; `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]` into `[[p1,c2,c3,p4], [p4,c5,c6,p7], ...]`
-    fn spline_windows(&self) -> SplineWindows<'_>  {
-        SplineWindows::new(self.spline())
-    }
-
-    /// Converts [{c,p,c}, {c,p,c}, ...] into [v,v,v,v,v,v,...]
-    fn subdivided(&self) -> Subdivided<'_> {
-        Subdivided::new(self.spline_windows())
-    }
-
-    // fn polygonize(&self) -> Box<[na::Vector2<f32>]> {
-    //     let polygon;
-    //     for curve_point in &self.points {
-    //         curve_point.p
-    //     }
-    //     polygon
-    // }
-
-    pub fn triangulate(&self) -> Box<[na::Vector2<f32>]> {
-        todo!()
     }
 }
 
@@ -344,7 +475,7 @@ mod test {
     fn test_spline_iter() {
         let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
 
-        let iter = curve.spline();
+        let iter = curve.iter().spline();
         assert_eq!(iter.len(), curve.points.len() * 3);
 
         let points = iter.collect::<Vec<_>>();
@@ -357,7 +488,7 @@ mod test {
     fn test_spline_iter_cyclic() {
         let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
 
-        let iter = curve.spline();
+        let iter = curve.iter().spline();
         assert_eq!(iter.len(), (curve.points.len() + 1) * 3);
 
         let points = iter.collect::<Vec<_>>();
@@ -370,7 +501,7 @@ mod test {
     fn test_spline_windows_iter() {
         let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
 
-        let iter = curve.spline_windows();
+        let iter = curve.iter().spline().spline_windows();
         assert_eq!(iter.len(), curve.points.len() - 1);
 
         let points = iter.collect::<Vec<_>>();
@@ -384,7 +515,7 @@ mod test {
     fn test_spline_windows_iter_cyclic() {
         let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
 
-        let iter = curve.spline_windows();
+        let iter = curve.iter().spline().spline_windows();
         assert_eq!(iter.len(), curve.points.len());
 
         let points = iter.collect::<Vec<_>>();
@@ -397,10 +528,12 @@ mod test {
 
     #[test]
     fn test_subdivided_iter() {
-        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
-        let expected_count = (curve.points.len() - 1) * SPLINE_DIVISIONS_PER_SEGMENT as usize;
+        const RES: u16 = 40;
 
-        let iter = curve.subdivided();
+        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
+        let expected_count = (curve.points.len() - 1) * RES as usize;
+
+        let iter = curve.iter().spline().spline_windows().samples::<RES>().with_positions();
         assert_eq!(iter.len(), expected_count);
 
         let points = iter.collect::<Vec<_>>();
@@ -409,10 +542,12 @@ mod test {
 
     #[test]
     fn test_subdivided_iter_cyclic() {
-        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
-        let expected_count = (curve.points.len()) * SPLINE_DIVISIONS_PER_SEGMENT as usize;
+        const RES: u16 = 40;
 
-        let iter = curve.subdivided();
+        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
+        let expected_count = (curve.points.len()) * RES as usize;
+
+        let iter = curve.iter().spline().spline_windows().samples::<RES>().with_positions();
         assert_eq!(iter.len(), expected_count);
 
         let points = iter.collect::<Vec<_>>();
@@ -420,20 +555,24 @@ mod test {
     }
 
     #[test]
-    fn test_subdivided_iter_positions() {
+    fn test_positions_iter() {
+        const RES: u16 = 40;
+
         let mut success = false;
         {
             let _lock = rl_lock();
             let (mut rl, thread) = init()
-                .title("test_subdivided_iter")
+                .title("test_positions_iter")
                 .build();
             rl.set_target_fps(60);
             let curve = make_curve!([-50,0](60,300)[50,0]->[-50,0](320,100)[50,0]->[-50,0](580,300)[50,0]);
-            let mut buffer_actual = Vec::new();
+            let mut positions_actual = Vec::new();
             while !rl.window_should_close() {
 
-                buffer_actual.clear();
-                buffer_actual.extend(curve.subdivided().map(Vector2::from));
+                positions_actual.clear();
+                for (_, p) in curve.iter().spline().spline_windows().samples::<RES>().with_positions() {
+                    positions_actual.push(Vector2::from(p));
+                }
 
                 let mut d = rl.begin_drawing(&thread);
                 d.clear_background(Color::RAYWHITE);
@@ -457,7 +596,7 @@ mod test {
                 );
 
                 // draw actual
-                d.draw_line_strip(&buffer_actual[..], Color::MAGENTA);
+                d.draw_line_strip(&positions_actual[..], Color::MAGENTA);
 
                 for point in &curve.points {
                     let p = Vector2::from(point.p);
@@ -471,20 +610,77 @@ mod test {
                 }
 
                 d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 54.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
-                d.gui_check_box(Rectangle::new(5.0, 5.0, 15.0, 15.0), Some(if success { c"pass" } else { c"fail" }), &mut success);
+                d.gui_check_box(Rectangle::new(5.0, 5.0, 15.0, 15.0), None, &mut success);
             }
         }
-        assert!(success, "manually failed");
+        assert!(success, "test failed");
     }
 
-    // #[test]
-    // fn polygon_test0() {
-    //     let curve = make_curve!([1, 5] (5, 3) -> (3, 3) -> cycle);
+    #[test]
+    fn test_velocities_iter() {
+        const RES: u16 = 40;
 
-    //     println!("{curve:#?}");
+        let mut success = false;
+        {
+            let _lock = rl_lock();
+            let (mut rl, thread) = init()
+                .title("test_velocities_iter")
+                .build();
+            rl.set_target_fps(60);
+            let curve = make_curve!([-50,0](60,300)[50,0]->[-50,0](320,100)[50,0]->[-50,0](580,300)[50,0]);
+            let mut positions_actual = Vec::new();
+            let mut velocities_actual = Vec::new();
+            while !rl.window_should_close() {
 
-    //     // let polygon = curve.polygonize();
+                positions_actual.clear();
+                velocities_actual.clear();
+                for ((_, p), v) in curve.iter().spline().spline_windows().samples::<RES>().with_positions().with_velocities() {
+                    positions_actual.push(Vector2::from(p));
+                    velocities_actual.push(Vector2::from(v));
+                }
 
-    //     // println!("{polygon:?}");
-    // }
+                let mut d = rl.begin_drawing(&thread);
+                d.clear_background(Color::RAYWHITE);
+
+                // draw expected
+                d.draw_spline_segment_bezier_cubic(
+                    Vector2::from(curve.points[0].p),
+                    Vector2::from(curve.points[0].p + curve.points[0].c_out),
+                    Vector2::from(curve.points[1].p + curve.points[1].c_in),
+                    Vector2::from(curve.points[1].p),
+                    5.0,
+                    Color::GREEN.alpha(0.5),
+                );
+                d.draw_spline_segment_bezier_cubic(
+                    Vector2::from(curve.points[1].p),
+                    Vector2::from(curve.points[1].p + curve.points[1].c_out),
+                    Vector2::from(curve.points[2].p + curve.points[2].c_in),
+                    Vector2::from(curve.points[2].p),
+                    5.0,
+                    Color::GREEN.alpha(0.5),
+                );
+
+                // draw actual
+                d.draw_line_strip(&positions_actual[..], Color::MAGENTA);
+                for (p, v) in positions_actual.iter().zip(velocities_actual.iter()) {
+                    d.draw_line_v(p, *p + *v, Color::ORANGE);
+                }
+
+                for point in &curve.points {
+                    let p = Vector2::from(point.p);
+                    let p_in = Vector2::from(point.p + point.c_in);
+                    let p_out = Vector2::from(point.p + point.c_out);
+                    d.draw_line_v(p, p_in, Color::GRAY.alpha(0.5));
+                    d.draw_line_v(p, p_out, Color::GRAY.alpha(0.5));
+                    d.draw_ring(p, 9.0, 11.0, 0.0, 360.0, 30, Color::RED);
+                    d.draw_ring(p_in,  4.0, 6.0, 0.0, 360.0, 20, Color::BLUE);
+                    d.draw_ring(p_out, 4.0, 6.0, 0.0, 360.0, 20, Color::BLUE);
+                }
+
+                d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 54.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
+                d.gui_check_box(Rectangle::new(5.0, 5.0, 15.0, 15.0), None, &mut success);
+            }
+        }
+        assert!(success, "test failed");
+    }
 }
