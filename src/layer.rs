@@ -1,25 +1,34 @@
 use std::{cell::RefCell, sync::{Arc, Weak}};
 use parking_lot::ReentrantMutex;
 use raylib::prelude::*;
-use crate::{curve::Curve, style::StrongStyle};
+use crate::{curve::WeakCurve, style::WeakStyle};
 
 pub type StrongRenderTexture2D =  Arc<ReentrantMutex<RefCell<RenderTexture2D>>>;
 pub type WeakRenderTexture2D   = Weak<ReentrantMutex<RefCell<RenderTexture2D>>>;
 
+/// A subset of layers that get rendered in a buffer together
 #[derive(Debug, Default)]
 pub struct Group {
+    /// The layers in the group
     pub layers: Vec<Layer>,
 }
 
 #[derive(Debug)]
 pub enum LayerContent {
-    Curve(Curve),
     Group(Group),
+    Curve(WeakCurve),
 }
 
 #[derive(Debug)]
 pub struct Layer {
+    /// The name of the layer, shown in the layer panel
     pub name: String,
+
+    /// The artwork content of the layer
     pub content: LayerContent,
-    pub style: StrongStyle,
+
+    /// The style applied to this layer's content
+    ///
+    /// Weakly refences a reuseably style stored at the document level
+    pub style: WeakStyle,
 }

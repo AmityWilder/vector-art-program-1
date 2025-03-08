@@ -1,9 +1,11 @@
 #![feature(let_chains, if_let_guard, arbitrary_self_types)]
 #![warn(arithmetic_overflow, clippy::arithmetic_side_effects)]
 
+use std::sync::Arc;
 use document::{Artboard, Document};
-use editor::{Editor, MaybeNewStyle, Tool};
-use engine::{Engine, EngineTab, EngineTabData};
+use editor::{Editor, MaybeNew, Tool};
+use engine::{Engine, EngineTab, EngineTabData, EngineTheme};
+use layer::{Layer, LayerContent};
 use raylib::prelude::{KeyboardKey::*, MouseButton::*, *};
 
 pub mod curve;
@@ -25,16 +27,27 @@ fn main() {
     rl.set_window_state(WindowState::set_window_maximized(rl.get_window_state(), true));
 
     // initialize engine
-    let mut engine = Engine::new();
+    let mut engine = Engine::new(EngineTheme::default_theme());
+
+    // new/open file arent implemented yet, but I still want to make sure documents work right
     #[cfg(debug_assertions)]
     {
         engine.create_editor({
-            Editor::new({
-                let mut document = Document::new("untitled".to_owned());
-                let artboard = Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0));
-                document.artboards.push(artboard);
-                document
-            }, MaybeNewStyle::new_default())
+            let document = Document::new("untitled".to_owned());
+            let mut editor = Editor::new(document, MaybeNew::new_default());
+            let style = editor.upgrade_current_style().clone();
+            editor.document.artboards.push({
+                Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0))
+            });
+            let content = LayerContent::Curve(Arc::downgrade(
+                editor.document.create_curve(make_curve!((60,60)[10,0]->[0,-10](80,80)[0,-10]->[-10,0](100,60)))
+            ));
+            editor.document.layers.push(Layer {
+                name: "new layer".to_owned(),
+                content,
+                style,
+            });
+            editor
         });
     }
 
@@ -47,9 +60,9 @@ fn main() {
                     match data {
                         EngineTabData::Editor { index, close_button_rect, .. } => {
                             if close_button_rect.check_collision_point_rec(mouse_pos) {
-                                _ = engine.remove_editor(index);
+                                engine.remove_editor(index);
                             } else {
-                                engine.focus_editor(index).expect("tab_iter should only iterate over valid indices");
+                                engine.focus_editor(index);
                             }
                         }
 
@@ -58,12 +71,12 @@ fn main() {
                                 Editor::new({
                                     let document = Document::new("untitled".to_owned());
                                     document
-                                }, MaybeNewStyle::new_default())
+                                }, MaybeNew::new_default())
                             });
                         }
 
                         EngineTabData::Open => {
-                            todo!()
+                            todo!("open file dialogue not yet implemented");
                         }
                     }
                 }
@@ -144,17 +157,49 @@ fn main() {
 
         // draw focused editor
         if let Some(editor) = engine.focused_editor() {
-            // draw artboard background
+            // draw viewport 2D
             {
                 let mut d = d.begin_mode2D(editor.camera);
+
+                // draw artboard backgrounds
                 for artboard in &editor.document.artboards {
                     d.draw_rectangle_rec(artboard.rect, editor.document.paper_color);
                 }
-            }
 
-            // draw artwork
-            {
-                // TODO
+                // draw artwork
+                for layer in &editor.document.layers {
+                    match &layer.content {
+                        // draw curve
+                        LayerContent::Curve(curve) => {
+                            let strong_curve = curve.upgrade().expect("should not hold onto dead layer");
+                            let curve_lock = strong_curve.lock();
+                            let curve_borrow = curve_lock.borrow();
+
+                            let iter = curve_borrow
+                                .pos_vel_iter::<40>()
+                                .flat_map(|(i, t, p, v)| {
+                                    const ROTATE_90DEG: na::Matrix2<f32> = na::Matrix2::new(
+                                        0.0, -1.0,
+                                        1.0,  0.0,
+                                    );
+                                    let _t_full = i as f32 + t;
+                                    let tangent = v.try_normalize(f32::EPSILON)?;
+                                    let outer = ROTATE_90DEG * tangent;
+                                    let inner = -outer;
+                                    Some((p + inner, p + outer))
+                                });
+
+                            for (inner, outer) in iter {
+                                d.draw_line_v(Vector2::from(inner), Vector2::from(outer), Color::RED);
+                            }
+                        }
+
+                        // draw group
+                        LayerContent::Group(_group) => {
+                            todo!("group rendering not yet implemented")
+                        }
+                    }
+                }
             }
 
             // draw tool visuals
@@ -201,7 +246,7 @@ fn main() {
                     };
 
                     let close_color = if is_close_button_hovered {
-                        engine.theme.color_danger
+                        engine.theme.color_destructive
                     } else if is_focused {
                         engine.theme.color_foreground
                     } else if is_hovered {

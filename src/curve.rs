@@ -2,11 +2,21 @@ use std::{cell::RefCell, sync::{Arc, Weak}};
 use parking_lot::ReentrantMutex;
 use raylib::prelude::*;
 
+/// A point in a [`Curve`]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CurvePoint {
-    pub c_in:  na::Vector2<f32>, // relative to p
-    pub p:     na::Vector2<f32>,
-    pub c_out: na::Vector2<f32>, // relative to p
+    /// Entry velocity
+    ///
+    /// Relative to `p`
+    pub c_in: na::Vector2<f32>,
+
+    /// Anchor position
+    pub p: na::Vector2<f32>,
+
+    /// Entry velocity
+    ///
+    /// Relative to `p`
+    pub c_out: na::Vector2<f32>,
 }
 
 pub struct CurveIter<'a> {
@@ -24,7 +34,9 @@ impl<'a> CurveIter<'a> {
         }
     }
 
-    /// Flattens `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]`
+    /// Flatten [`CurvePoint`]s into an array of vectors
+    ///
+    /// `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]`
     pub fn spline(self) -> FlatCurveIter<'a> {
         FlatCurveIter::new(self)
     }
@@ -72,7 +84,9 @@ impl<'a> FlatCurveIter<'a> {
         }
     }
 
-    /// Iterator over windows; `[{c,p,c}, {c,p,c}, ...]` into `[c,p,c, c,p,c, ...]` into `[[p1,c2,c3,p4], [p4,c5,c6,p7], ...]`
+    /// Group cubic bezier points into segments with overlapping anchor points
+    ///
+    /// `[c,p,c, c,p,c, ...]` into `[[p1,c2,c3,p4], [p4,c5,c6,p7], ...]`
     pub fn spline_windows(self) -> SplineWindows<'a>  {
         SplineWindows::new(self)
     }
@@ -116,7 +130,10 @@ impl<'a> SplineWindows<'a> {
         }
     }
 
-    pub fn samples<const RES: u16>(self) -> Sampled<'a, RES> {
+    /// Subdivide segments into `RES` evenly-separated t-values `[0.0..1.0]` and bezier indices
+    ///
+    /// `[[p1,c2,c3,p4], [p4,c5,c6,p7], ...]` into `[(0, 0.0), (0, 1/RES), (0, 2/RES), ..., (n-1, (RES-1)/RES)]`
+    pub fn sampled<const RES: u16>(self) -> Sampled<'a, RES> {
         Sampled::new(self)
     }
 }
@@ -146,11 +163,12 @@ impl<'a> Iterator for SplineWindows<'a> {
 
 impl ExactSizeIterator for SplineWindows<'_> {}
 
-#[allow(non_snake_case)]
-pub struct Sampled<'a, const RES: u16 = 40> {
+pub struct Sampled<'a, const RES: u16> {
     iter: SplineWindows<'a>,
     mat: na::Matrix2x4<f32>,
-    i: u16,
+    spline_index: u32,
+    is_initialized: bool,
+    segment: u16,
 }
 
 impl<'a, const RES: u16> Sampled<'a, RES> {
@@ -161,31 +179,42 @@ impl<'a, const RES: u16> Sampled<'a, RES> {
         Self {
             iter,
             mat: Default::default(),
-            i: Self::RESOLUTION,
+            spline_index: 0,
+            is_initialized: false,
+            segment: Self::RESOLUTION,
         }
     }
 
+    /// Get the buffered matrix of bezier control points
+    ///
+    /// The buffer reflects the state of the current iteration
+    /// (whatever was most recently returned by [`Sampled::next()`])
     fn mat(&self) -> &na::Matrix2x4<f32> {
         &self.mat
     }
 }
 
 impl<'a, const RES: u16> Iterator for Sampled<'a, RES> {
-    type Item = f32;
+    type Item = (u32, f32);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.i == Self::RESOLUTION {
-            self.i = 0;
+        if self.segment == Self::RESOLUTION {
+            if self.is_initialized {
+                self.spline_index += 1;
+            } else {
+                self.is_initialized = true;
+            }
+            self.segment = 0;
             let vecs = self.iter.next()?;
             self.mat = na::Matrix::from_columns(&vecs);
         }
-        let t = self.i as f32 * Self::STEP;
-        self.i += 1;
-        Some(t)
+        let t = self.segment as f32 * Self::STEP;
+        self.segment += 1;
+        Some((self.spline_index, t))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = (self.iter.len() + 1) * Self::RESOLUTION as usize - self.i as usize;
+        let len = (self.iter.len() + 1) * Self::RESOLUTION as usize - self.segment as usize;
         (len, Some(len))
     }
 }
@@ -194,14 +223,17 @@ impl<const RES: u16> ExactSizeIterator for Sampled<'_, RES> {}
 
 trait SamplingHelper: Sized + Iterator {
     const RES: u16;
-    type Sampled: ExactSizeIterator<Item = f32>;
+    type Sampled: ExactSizeIterator<Item = (u32, f32)>;
 
-    /// ```no_run
+    /// ```
     /// [[x1, x2, x3, x4]
     ///  [y1, y2, y3, y4]]
     /// ```
     fn mat(&self) -> &na::Matrix2x4<f32>;
-    fn item_sample(item: &Self::Item) -> f32;
+
+    /// Get the output of the latest [`Sampled`] in the chain,
+    /// regardless of iterator nesting
+    fn item_sample(item: &Self::Item) -> <Self::Sampled as Iterator>::Item;
 }
 
 impl<'a, const RES: u16> SamplingHelper for Sampled<'a, RES> {
@@ -214,18 +246,20 @@ impl<'a, const RES: u16> SamplingHelper for Sampled<'a, RES> {
     }
 
     #[inline]
-    fn item_sample(item: &Self::Item) -> f32 {
+    fn item_sample(item: &Self::Item) -> <Self::Sampled as Iterator>::Item {
         *item
     }
 }
 
 #[allow(private_bounds)]
 pub trait Sampling: SamplingHelper {
+    /// Calculate the position alongside each sample
     #[inline]
     fn with_positions(self) -> Positions<Self> {
         Positions::new(self)
     }
 
+    /// Calculate the velocity alongside each sample
     #[inline]
     fn with_velocities(self) -> Velocities<Self> {
         Velocities::new(self)
@@ -245,20 +279,19 @@ impl<I> Positions<I> {
     }
 }
 
-const P_COEFS: na::Matrix4<f32> = na::Matrix4::new(
-    -1.0,  3.0, -3.0,  1.0,
-     3.0, -6.0,  3.0,  0.0,
-    -3.0,  3.0,  0.0,  0.0,
-     1.0,  0.0,  0.0,  0.0,
-);
-
 impl<I: SamplingHelper> Iterator for Positions<I> {
     type Item = (I::Item, na::Vector2<f32>);
 
     #[allow(non_snake_case)]
     fn next(&mut self) -> Option<Self::Item> {
+        const P_COEFS: na::Matrix4<f32> = na::Matrix4::new(
+            -1.0,  3.0, -3.0,  1.0,
+             3.0, -6.0,  3.0,  0.0,
+            -3.0,  3.0,  0.0,  0.0,
+             1.0,  0.0,  0.0,  0.0,
+        );
         let item = self.iter.next()?;
-        let t = I::item_sample(&item);
+        let (_, t) = I::item_sample(&item);
         let T = na::Vector4::new(t*t*t, t*t, t, 1.0);
         Some((item, (self.mat()*P_COEFS*T)))
     }
@@ -281,12 +314,11 @@ impl<I: SamplingHelper> SamplingHelper for Positions<I> {
     }
 
     #[inline]
-    fn item_sample(item: &Self::Item) -> f32 {
+    fn item_sample(item: &Self::Item) -> <Self::Sampled as Iterator>::Item {
         I::item_sample(&item.0)
     }
 }
 
-#[allow(non_snake_case)]
 pub struct Velocities<I> {
     iter: I,
 }
@@ -297,20 +329,19 @@ impl<I> Velocities<I> {
     }
 }
 
-const V_COEFS: na::Matrix4x3<f32> = na::Matrix4x3::new(
-    -3.0,   6.0, -3.0,
-     9.0, -12.0,  3.0,
-    -9.0,   6.0,  0.0,
-     3.0,   0.0,  0.0,
-);
-
 impl<I: SamplingHelper> Iterator for Velocities<I> {
     type Item = (I::Item, na::Vector2<f32>);
 
     #[allow(non_snake_case)]
     fn next(&mut self) -> Option<Self::Item> {
+        const V_COEFS: na::Matrix4x3<f32> = na::Matrix4x3::new(
+            -3.0,   6.0, -3.0,
+             9.0, -12.0,  3.0,
+            -9.0,   6.0,  0.0,
+             3.0,   0.0,  0.0,
+        );
         let item = self.iter.next()?;
-        let t = I::item_sample(&item);
+        let (_, t) = I::item_sample(&item);
         let T = na::Vector3::new(t*t, t, 1.0);
         Some((item, self.mat()*V_COEFS*T))
     }
@@ -331,14 +362,24 @@ impl<I: SamplingHelper> SamplingHelper for Velocities<I> {
     }
 
     #[inline]
-    fn item_sample(item: &Self::Item) -> f32 {
+    fn item_sample(item: &Self::Item) -> <Self::Sampled as Iterator>::Item {
         I::item_sample(&item.0)
     }
 }
 
+/// A collection of cubic bezier curve patches.
 #[derive(Debug, Clone, Default)]
 pub struct Curve {
+    /// The array of bezier control points
+    ///
+    /// `[{c,p,c}, {c,p,c}, ...]`
     pub points: Vec<CurvePoint>,
+
+    /// Whether the curve is a closed loop \
+    /// "is the tail connected to the tip?"
+    ///
+    /// The tip and tail **don't need** to be at
+    /// the same position, and preferrably aren't
     pub is_closed: bool,
 }
 
@@ -346,6 +387,9 @@ pub type StrongCurve =  Arc<ReentrantMutex<RefCell<Curve>>>;
 pub type WeakCurve   = Weak<ReentrantMutex<RefCell<Curve>>>;
 
 impl From<Rectangle> for Curve {
+    /// Construct a curve that matches the shape and position of a rectangle
+    ///
+    /// Useful for creating raster paths
     fn from(Rectangle { x, y, width, height }: Rectangle) -> Self {
         let left   = x;
         let top    = y;
@@ -371,11 +415,73 @@ impl Curve {
         }
     }
 
+    /// Iterate over points in a [`Curve`]
+    ///
+    /// Includes the first point a second time,
+    /// after the last point, if the curve is closed.
     pub fn iter(&self) -> CurveIter<'_> {
         CurveIter::new(self.points.iter(), self.is_closed)
     }
+
+    /// Convenience method for
+    ///
+    /// 1. [.`iter()`](`Curve::iter`)
+    /// 2. [.`spline()`](`CurveIter::spline`)
+    /// 3. [.`spline_windows()`](`FlatCurveIter::spline_windows`)
+    /// 4. [.`sampled()`](`SplineWindows::sampled`)
+    #[inline]
+    pub fn sampled_iter<const RES: u16>(&self) -> Sampled<'_, RES> {
+        self.iter()
+            .spline()
+            .spline_windows()
+            .sampled::<RES>()
+    }
+
+    /// Get an iterator over positions and velocities
+    ///
+    /// Convenience method for
+    ///
+    /// 1. [.`iter()`](`Curve::iter`)
+    /// 2. [.`spline()`](`CurveIter::spline`)
+    /// 3. [.`spline_windows()`](`FlatCurveIter::spline_windows`)
+    /// 4. [.`sampled()`](`SplineWindows::sampled`)
+    /// 5. [.`with_positions()`](`Sampled::with_positions`)
+    /// 6. [.`with_velocities()`](`Sampled::with_velocities`)
+    #[inline]
+    pub fn pos_vel_iter<const RES: u16>(&self) -> std::iter::Map<
+        Velocities<Positions<Sampled<'_, RES>>>,
+        impl FnMut((((u32, f32), na::Vector2<f32>), na::Vector2<f32>)) -> (u32, f32, na::Vector2<f32>, na::Vector2<f32>),
+    > {
+        self.iter()
+            .spline()
+            .spline_windows()
+            .sampled::<RES>()
+            .with_positions()
+            .with_velocities()
+            .map(|(((i, t), p), v)| (i, t, p, v))
+    }
 }
 
+/// Construct a [`CurvePoint`] using Tikz-inspired syntax
+///
+/// - `(..., ...)` - Anchor point (mandatory)
+/// - `[..., ...]` - Velocity control (optional - defaults to 0,0)
+///
+/// # Example
+/// ```
+/// # use crate::make_curve;
+/// # use crate::na;
+/// let pp = make_curve_point!([0,1] (2,3) [4,5]);
+/// assert_eq!(pp.c_in,  na::Vector2::new(0.0, 1.0));
+/// assert_eq!(pp.p,     na::Vector2::new(2.0, 3.0));
+/// assert_eq!(pp.c_out, na::Vector2::new(4.0, 5.0));
+///
+/// let pp = make_curve_point!((2,3) [4,5]);
+/// assert_eq!(pp.c_in, na::Vector2::new(0.0, 0.0));
+///
+/// let pp = make_curve_point!([0,1] (2,3));
+/// assert_eq!(pp.c_out, na::Vector2::new(0.0, 0.0));
+/// ```
 #[macro_export]
 macro_rules! make_curve_point {
     ([$x_in:expr, $y_in:expr] ($x:expr, $y:expr) [$x_out:expr, $y_out:expr]) => {
@@ -396,6 +502,24 @@ macro_rules! make_curve_point {
     };
 }
 
+/// Construct a [`Curve`] using Tikz-inspired syntax
+///
+/// - `(..., ...)` - Anchor point (mandatory)
+/// - `[..., ...]` - Velocity control (optional - defaults to 0,0)
+/// - `->` - Separator between controls
+/// - `cycle` - Curve is a closed loop (only valid at end)
+///
+/// # Example
+/// ```
+/// # use crate::make_curve;
+/// let curve = make_curve!([0,1] (2,3) [4,5] -> [6,7] (8,9) [10,11] -> [12,13] (14,15) [16,17]);
+/// assert_eq!(curve.points, &[
+///     make_curve_point!([ 0, 1] ( 2, 3) [ 4, 5]),
+///     make_curve_point!([ 6, 7] ( 8, 9) [10,11]),
+///     make_curve_point!([12,13] (14,15) [16,17]),
+/// ]);
+/// assert!(!curve.is_closed);
+/// ```
 #[macro_export]
 macro_rules! make_curve {
     ($($([$x_in:expr, $y_in:expr])? ($x:expr, $y:expr) $([$x_out:expr, $y_out:expr])?)->* -> cycle) => {
@@ -429,8 +553,9 @@ mod test {
     use super::*;
     use crate::make_curve;
 
-    static RL_MUX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Ensure only one visual test can be open at a time
     fn rl_lock() -> std::sync::MutexGuard<'static, ()> {
+        static RL_MUX: std::sync::Mutex<()> = std::sync::Mutex::new(());
         RL_MUX.lock().unwrap_or_else(|x| { RL_MUX.clear_poison(); x.into_inner() })
     }
 
@@ -527,42 +652,60 @@ mod test {
     }
 
     #[test]
-    fn test_subdivided_iter() {
-        const RES: u16 = 40;
+    fn test_sampled_iter() {
+        const RES: u16 = 4;
 
         let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
         let expected_count = (curve.points.len() - 1) * RES as usize;
 
-        let iter = curve.iter().spline().spline_windows().samples::<RES>().with_positions();
+        let iter = curve.iter().spline().spline_windows().sampled::<RES>();
         assert_eq!(iter.len(), expected_count);
 
         let points = iter.collect::<Vec<_>>();
         assert_eq!(points.len(), expected_count);
-    }
 
-    #[test]
-    fn test_subdivided_iter_cyclic() {
-        const RES: u16 = 40;
-
-        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
-        let expected_count = (curve.points.len()) * RES as usize;
-
-        let iter = curve.iter().spline().spline_windows().samples::<RES>().with_positions();
-        assert_eq!(iter.len(), expected_count);
-
-        let points = iter.collect::<Vec<_>>();
-        assert_eq!(points.len(), expected_count);
+        for (i, t) in points {
+            println!("{i}, {t}");
+        }
     }
 
     #[test]
     fn test_positions_iter() {
         const RES: u16 = 40;
 
+        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]);
+        let expected_count = (curve.points.len() - 1) * RES as usize;
+
+        let iter = curve.iter().spline().spline_windows().sampled::<RES>().with_positions();
+        assert_eq!(iter.len(), expected_count);
+
+        let points = iter.collect::<Vec<_>>();
+        assert_eq!(points.len(), expected_count);
+    }
+
+    #[test]
+    fn test_positions_iter_cyclic() {
+        const RES: u16 = 40;
+
+        let curve = make_curve!([0,1](2,3)[4,5]->[6,7](8,9)[10,11]->[12,13](14,15)[16,17]->cycle);
+        let expected_count = (curve.points.len()) * RES as usize;
+
+        let iter = curve.iter().spline().spline_windows().sampled::<RES>().with_positions();
+        assert_eq!(iter.len(), expected_count);
+
+        let points = iter.collect::<Vec<_>>();
+        assert_eq!(points.len(), expected_count);
+    }
+
+    #[test]
+    fn test_positions_iter_vis() {
+        const RES: u16 = 40;
+
         let mut success = false;
         {
             let _lock = rl_lock();
             let (mut rl, thread) = init()
-                .title("test_positions_iter")
+                .title("test_positions_iter_vis")
                 .build();
             rl.set_target_fps(60);
             let curve = make_curve!([-50,0](60,300)[50,0]->[-50,0](320,100)[50,0]->[-50,0](580,300)[50,0]);
@@ -570,7 +713,7 @@ mod test {
             while !rl.window_should_close() {
 
                 positions_actual.clear();
-                for (_, p) in curve.iter().spline().spline_windows().samples::<RES>().with_positions() {
+                for (_, p) in curve.iter().spline().spline_windows().sampled::<RES>().with_positions() {
                     positions_actual.push(Vector2::from(p));
                 }
 
@@ -609,7 +752,7 @@ mod test {
                     d.draw_ring(p_out, 4.0, 6.0, 0.0, 360.0, 20, Color::BLUE);
                 }
 
-                d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 54.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
+                d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 21.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
                 d.gui_check_box(Rectangle::new(5.0, 5.0, 15.0, 15.0), None, &mut success);
             }
         }
@@ -617,24 +760,23 @@ mod test {
     }
 
     #[test]
-    fn test_velocities_iter() {
+    fn test_velocities_iter_vis() {
         const RES: u16 = 40;
 
         let mut success = false;
         {
             let _lock = rl_lock();
             let (mut rl, thread) = init()
-                .title("test_velocities_iter")
+                .title("test_velocities_iter_vis")
                 .build();
             rl.set_target_fps(60);
             let curve = make_curve!([-50,0](60,300)[50,0]->[-50,0](320,100)[50,0]->[-50,0](580,300)[50,0]);
             let mut positions_actual = Vec::new();
             let mut velocities_actual = Vec::new();
             while !rl.window_should_close() {
-
                 positions_actual.clear();
                 velocities_actual.clear();
-                for ((_, p), v) in curve.iter().spline().spline_windows().samples::<RES>().with_positions().with_velocities() {
+                for ((_, p), v) in curve.iter().spline().spline_windows().sampled::<RES>().with_positions().with_velocities() {
                     positions_actual.push(Vector2::from(p));
                     velocities_actual.push(Vector2::from(v));
                 }
@@ -677,7 +819,7 @@ mod test {
                     d.draw_ring(p_out, 4.0, 6.0, 0.0, 360.0, 20, Color::BLUE);
                 }
 
-                d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 54.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
+                d.draw_rectangle_rec(Rectangle::new(2.0, 2.0, 21.0, 21.0), if success { Color::GREEN } else { Color::RED }.alpha(0.5));
                 d.gui_check_box(Rectangle::new(5.0, 5.0, 15.0, 15.0), None, &mut success);
             }
         }
