@@ -7,13 +7,25 @@ use editor::{Editor, MaybeNew, Tool};
 use engine::{Engine, EngineTab, EngineTabData, EngineTheme};
 use layer::{Layer, LayerContent};
 use raylib::prelude::{KeyboardKey::*, MouseButton::*, *};
+use style::{Style, WidthProfile};
 
-pub mod curve;
-pub mod document;
-pub mod editor;
-pub mod engine;
-pub mod layer;
-pub mod style;
+/// Vector path
+mod curve;
+
+/// Serializeable artwork
+mod document;
+
+/// [Document][`crate::document::Document`] editing and tools
+mod editor;
+
+/// Organizer for all open [editor][`crate::editor::Editor`]
+mod engine;
+
+/// [Document][`crate::document::Document`] element
+mod layer;
+
+/// Layer appearance modification
+mod style;
 
 #[allow(clippy::cognitive_complexity, reason = "you always overcomplicate everything when you listen to this about the main function, Amy.")]
 fn main() {
@@ -33,8 +45,9 @@ fn main() {
     #[cfg(debug_assertions)]
     {
         engine.create_editor({
-            let document = Document::new("untitled".to_owned());
-            let mut editor = Editor::new(document, MaybeNew::new_default());
+            let mut document = Document::new("untitled".to_owned());
+            let profile = Arc::downgrade(document.create_width_profile(WidthProfile::default_width_profile()));
+            let mut editor = Editor::new(document, MaybeNew::New(Style::default_style(profile)));
             let style = editor.upgrade_current_style().clone();
             editor.document.artboards.push({
                 Artboard::new("artboard 1".to_owned(), Rectangle::new(0.0, 0.0, 512.0, 512.0))
@@ -68,10 +81,9 @@ fn main() {
 
                         EngineTabData::New => {
                             engine.create_editor({
-                                Editor::new({
-                                    let document = Document::new("untitled".to_owned());
-                                    document
-                                }, MaybeNew::new_default())
+                                let mut document = Document::new("untitled".to_owned());
+                                let profile = Arc::downgrade(document.create_width_profile(WidthProfile::default_width_profile()));
+                                Editor::new(document, MaybeNew::New(Style::default_style(profile)))
                             });
                         }
 

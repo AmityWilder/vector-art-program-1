@@ -6,7 +6,13 @@ use raylib::prelude::*;
 /// A color or texture that can be applied to a stroke or fill
 #[derive(Debug, Clone)]
 pub enum Pattern {
+    /// A solid color across the entire region
     Solid(Color),
+
+    /// A texture applied to the region
+    ///
+    /// The texture can be painted to with [`RasterBrush`][`crate::editor::Tool::RasterBrush`],
+    /// modifying all linked instances simultaneously
     Texture(WeakRenderTexture2D),
 }
 
@@ -69,6 +75,7 @@ pub struct WidthProfileControl {
 }
 
 impl WidthProfileControl {
+    /// Construct an empty control filled with 0s
     pub const fn new() -> Self {
         Self {
             t: 0.0,
@@ -77,6 +84,7 @@ impl WidthProfileControl {
         }
     }
 
+    /// Construct a new control at `t` with the same thickness on both sides
     pub fn new_even(t: f32, vert: WidthProfileVertex) -> Self {
         Self {
             t,
@@ -101,6 +109,11 @@ impl Default for WidthProfile {
 }
 
 impl WidthProfile {
+    /// The width profile used when the user hasn't customized it
+    pub const fn default_width_profile() -> Self {
+        Self::Constant { inner: 5.0, outer: 5.0 }
+    }
+
     /// Construct an empty width profile
     pub const fn new() -> Self {
         Self::Constant { inner: 0.0, outer: 0.0 }
@@ -117,28 +130,30 @@ impl WidthProfile {
     }
 }
 
+pub type StrongWidthProfile =  Arc<ReentrantMutex<RefCell<WidthProfile>>>;
+pub type WeakWidthProfile   = Weak<ReentrantMutex<RefCell<WidthProfile>>>;
+
 #[derive(Debug, Clone)]
 pub struct Stroke {
     /// The color pattern applied to the stroke
     pub pattern: Pattern,
 
     /// The thickness curve of the stroke
-    pub width: WidthProfile,
+    pub width: Option<WeakWidthProfile>,
 }
 
 impl Default for Stroke {
-    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl Stroke {
-    /// Construct an empty, transparent, constant zero-width stroke
+    /// Construct a transparent stroke with no width
     pub const fn new() -> Self {
         Self {
             pattern: Pattern::new(),
-            width: WidthProfile::new(),
+            width: None,
         }
     }
 }
@@ -170,15 +185,18 @@ impl Modifier {
     }
 }
 
+/// A wrapper for [`Modifier`] that includes the display name
 #[derive(Debug, Clone)]
 pub struct StyleItem {
     /// If [`None`], defaults to the modifier variant
     pub name: Option<String>,
+
     /// The modifier being applied by this item
     pub modifier: Modifier,
 }
 
 impl StyleItem {
+    /// Construct an unnamed style item
     pub const fn new(modifier: Modifier) -> Self {
         Self {
             name: None,
@@ -186,6 +204,9 @@ impl StyleItem {
         }
     }
 
+    /// The display name of the item
+    ///
+    /// Defaults to [`Modifier::name`] if `name` is [`None`]
     #[inline]
     pub fn name(&self) -> &str {
         if let Some(name) = &self.name {
@@ -209,23 +230,32 @@ pub struct Style {
     /// A transparent fill or zero-width thickness tells the renderer to skip outlining the path
     pub stroke: Stroke,
 
+    /// The collection of appearance modifiers
+    ///
+    /// Stored in the order they are applied
     pub items: Vec<StyleItem>,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Style {
     /// The style used when the user hasn't customized it
-    pub const fn default_style() -> Self {
+    pub const fn default_style(width: WeakWidthProfile) -> Self {
         Self {
             fill: Pattern::Solid(Color::SLATEBLUE),
             stroke: Stroke {
                 pattern: Pattern::Solid(Color::BLACK),
-                width: WidthProfile::Constant { inner: 5.0, outer: 5.0 },
+                width: Some(width),
             },
             items: Vec::new(),
         }
     }
 
-    /// Construct an empty, transparent style without allocating
+    /// Construct an empty, transparent, zero-width style without allocating
     pub const fn new() -> Self {
         Self {
             fill: Pattern::new(),

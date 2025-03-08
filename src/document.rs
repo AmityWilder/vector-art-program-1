@@ -1,8 +1,9 @@
 use std::{cell::RefCell, path::PathBuf, sync::Arc};
 use parking_lot::ReentrantMutex;
 use raylib::prelude::*;
-use crate::{curve::{Curve, StrongCurve}, layer::{Layer, StrongRenderTexture2D}, style::{StrongStyle, Style}};
+use crate::{curve::{Curve, StrongCurve}, layer::{Layer, StrongRenderTexture2D}, style::{StrongStyle, StrongWidthProfile, Style, WidthProfile}};
 
+/// An independently-exported crop region of the document artwork
 #[derive(Debug)]
 pub struct Artboard {
     /// The display name of the artboard
@@ -13,6 +14,7 @@ pub struct Artboard {
 }
 
 impl Artboard {
+    /// Construct a new artboard
     pub const fn new(name: String, rect: Rectangle) -> Self {
         Self { name, rect }
     }
@@ -26,6 +28,12 @@ pub struct Document {
     /// A raster should be removed when the weak count is 0; the
     /// document doesn't need a raster if no style references it
     pub rasters: Vec<StrongRenderTexture2D>,
+
+    /// Multiple styles can reference the same width_profile
+    ///
+    /// A width_profile should be removed when the weak count is 0; the
+    /// document doesn't need a width_profile if no style references it
+    pub width_profiles: Vec<StrongWidthProfile>,
 
     /// Multiple curves can reference the same style
     ///
@@ -61,6 +69,7 @@ impl Document {
     pub const fn new(title: String) -> Self {
         Self {
             rasters: Vec::new(),
+            width_profiles: Vec::new(),
             styles: Vec::new(),
             curves: Vec::new(),
 
@@ -73,20 +82,42 @@ impl Document {
     }
 
     /// Push a new local raster to the document and get a reference to it
-    pub fn create_render_texture(&mut self, rtex: RenderTexture2D) -> &StrongRenderTexture2D {
+    pub fn create_raster(&mut self, rtex: RenderTexture2D) -> &StrongRenderTexture2D {
         self.rasters.push(Arc::new(ReentrantMutex::new(RefCell::new(rtex))));
-        self.rasters.last().expect("should have at least one element after push")
+        #[cfg(debug_assertions)] {
+            self.rasters.last().expect("should have at least one element after push")
+        } #[cfg(not(debug_assertions))] {
+            unsafe { self.rasters.last().unwrap_unchecked() }
+        }
+    }
+
+    /// Push a new local width profile to the document and get a reference to it
+    pub fn create_width_profile(&mut self, profile: WidthProfile) -> &StrongWidthProfile {
+        self.width_profiles.push(Arc::new(ReentrantMutex::new(RefCell::new(profile))));
+        #[cfg(debug_assertions)] {
+            self.width_profiles.last().expect("should have at least one element after push")
+        } #[cfg(not(debug_assertions))] {
+            unsafe { self.width_profiles.last().unwrap_unchecked() }
+        }
     }
 
     /// Push a new local style to the document and get a reference to it
     pub fn create_style(&mut self, style: Style) -> &StrongStyle {
         self.styles.push(Arc::new(ReentrantMutex::new(RefCell::new(style))));
-        self.styles.last().expect("should have at least one element after push")
+        #[cfg(debug_assertions)] {
+            self.styles.last().expect("should have at least one element after push")
+        } #[cfg(not(debug_assertions))] {
+            unsafe { self.styles.last().unwrap_unchecked() }
+        }
     }
 
     /// Push a new local curve to the document and get a reference to it
     pub fn create_curve(&mut self, curve: Curve) -> &StrongCurve {
         self.curves.push(Arc::new(ReentrantMutex::new(RefCell::new(curve))));
-        self.curves.last().expect("should have at least one element after push")
+        #[cfg(debug_assertions)] {
+            self.curves.last().expect("should have at least one element after push")
+        } #[cfg(not(debug_assertions))] {
+            unsafe { self.curves.last().unwrap_unchecked() }
+        }
     }
 }

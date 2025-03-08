@@ -452,10 +452,7 @@ impl Curve {
         Velocities<Positions<Sampled<'_, RES>>>,
         impl FnMut((((u32, f32), na::Vector2<f32>), na::Vector2<f32>)) -> (u32, f32, na::Vector2<f32>, na::Vector2<f32>),
     > {
-        self.iter()
-            .spline()
-            .spline_windows()
-            .sampled::<RES>()
+        self.sampled_iter()
             .with_positions()
             .with_velocities()
             .map(|(((i, t), p), v)| (i, t, p, v))

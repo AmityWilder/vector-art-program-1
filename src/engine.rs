@@ -33,7 +33,7 @@ impl EngineTheme {
             color_panel: Color::new(48, 48, 48, 255),
             color_panel_edge: Color::new(32, 32, 32, 255),
             color_accent: Color::BLUEVIOLET,
-            color_destructive: Color::CORAL,
+            color_destructive: Color::CRIMSON,
             color_irreversible: Color::RED,
             font_size: 10,
         }

@@ -13,6 +13,7 @@ pub struct Group {
     pub layers: Vec<Layer>,
 }
 
+/// The actual content of a layer; either artwork or a collection of artwork
 #[derive(Debug)]
 pub enum LayerContent {
     Group(Group),
@@ -29,6 +30,6 @@ pub struct Layer {
 
     /// The style applied to this layer's content
     ///
-    /// Weakly refences a reuseably style stored at the document level
+    /// Weakly refences a reuseably style stored at the [`Document`][`crate::document::Document`] level
     pub style: WeakStyle,
 }
